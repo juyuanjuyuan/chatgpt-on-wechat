@@ -1,0 +1,73 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cowagent}
+      POSTGRES_USER: ${POSTGRES_USER:-cow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cow}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mcp-api-server:
+    build:
+      context: .
+      dockerfile: mcp_api_server/Dockerfile
+    environment:
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql+psycopg2://cow:cow@postgres:5432/cowagent}
+      JWT_SECRET: ${JWT_SECRET:-cowagent-jwt}
+      MEDIA_TOKEN: ${MEDIA_TOKEN:-media-secret}
+      MEDIA_DIR: /app/data/media
+      DASHBOARD_ADMIN_USER: ${DASHBOARD_ADMIN_USER:-admin}
+      DASHBOARD_ADMIN_PASS: ${DASHBOARD_ADMIN_PASS:-admin123}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost:8080}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - media_data:/app/data/media
+    ports:
+      - "8001:8001"
+
+  agent-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MCP_BASE_URL: http://mcp-api-server:8001
+      PROMPT_CACHE_SECONDS: 30
+    depends_on:
+      - mcp-api-server
+    command: ["python", "app.py"]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    environment:
+      NEXT_PUBLIC_MCP_BASE_URL: http://localhost:8001
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mcp-api-server
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./docker/nginx.cowagent.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - dashboard
+      - mcp-api-server
+
+volumes:
+  pgdata:
+  media_data:

@@ -18,11 +18,13 @@ from common.log import logger
 from common.token_bucket import TokenBucket
 from config import conf, load_config
 from models.baidu.baidu_wenxin_session import BaiduWenxinSession
+from common.cowagent_runtime import MCPRuntimeClient
 
 # OpenAI对话模型API (可用)
 class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
     def __init__(self):
         super().__init__()
+        self.runtime_client = MCPRuntimeClient()
         # set the default api_key
         openai.api_key = conf().get("open_ai_api_key")
         if conf().get("open_ai_api_base"):
@@ -85,7 +87,17 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
                 reply = Reply(ReplyType.INFO, "配置已更新")
             if reply:
                 return reply
-            session = self.sessions.session_query(query, session_id)
+            runtime_prompt = self.runtime_client.get_active_prompt()
+            if runtime_prompt:
+                session = self.sessions.build_session(session_id, runtime_prompt)
+                session.add_query(query)
+                try:
+                    max_tokens = conf().get("conversation_max_tokens", 1000)
+                    session.discard_exceeding(max_tokens, None)
+                except Exception as e:
+                    logger.warning("Exception when counting tokens precisely for prompt: {}".format(str(e)))
+            else:
+                session = self.sessions.session_query(query, session_id)
             logger.debug("[CHATGPT] session query={}".format(session.messages))
 
             api_key = context.get("openai_api_key")
