@@ -10,6 +10,7 @@ from bridge.reply import *
 from channel.channel import Channel
 from common.dequeue import Dequeue
 from common import memory
+from common.cowagent_runtime import MCPRuntimeClient, is_underage, is_photo_refusal, increase_refusal_and_check_stop
 from plugins import *
 
 try:
@@ -18,6 +19,7 @@ except Exception as e:
     pass
 
 handler_pool = ThreadPoolExecutor(max_workers=8)  # 处理消息的线程池
+runtime_client = MCPRuntimeClient()
 
 
 # 抽象类, 它包含了与消息通道无关的通用处理逻辑
@@ -177,6 +179,36 @@ class ChatChannel(Channel):
     def _handle(self, context: Context):
         if context is None or not context.content:
             return
+        cmsg = context.get("msg")
+        external_id = None
+        session_key = context.get("session_id")
+        channel_type = context.get("channel_type", "unknown")
+        if cmsg:
+            external_id = getattr(cmsg, "other_user_id", None)
+            runtime_client.upsert_candidate(external_id=external_id, nickname=getattr(cmsg, "from_user_nickname", None))
+            runtime_client.log_message(
+                external_id=external_id,
+                session_key=session_key,
+                channel=channel_type,
+                sender="user",
+                message_type=str(context.type).split(".")[-1].lower(),
+                content=str(context.content),
+            )
+            if context.type == ContextType.TEXT and is_underage(str(context.content)):
+                runtime_client.add_event(external_id, session_key, "underage_stop")
+                runtime_client._post("/candidates/upsert", {"external_id": external_id, "status": "underage_terminated"})
+                self._send_reply(context, Reply(ReplyType.TEXT, "抱歉宝子，Welike 招募仅面向年满 18 岁的应聘者，先不继续流程啦。"))
+                runtime_client.log_message(external_id, session_key, channel_type, "assistant", "text", "抱歉宝子，Welike 招募仅面向年满 18 岁的应聘者，先不继续流程啦。")
+                return
+            if context.type == ContextType.TEXT and is_photo_refusal(str(context.content)):
+                runtime_client.add_event(external_id, session_key, "photo_refused_n", {"content": str(context.content)})
+                if increase_refusal_and_check_stop(str(session_key)):
+                    runtime_client._post("/candidates/upsert", {"external_id": external_id, "status": "pending_photo"})
+                    stop_msg = "了解啦宝子，不强求你发照片～你后续如果愿意再发我，随时找我就行。"
+                    self._send_reply(context, Reply(ReplyType.TEXT, stop_msg))
+                    runtime_client.log_message(external_id, session_key, channel_type, "assistant", "text", stop_msg)
+                    return
+
         logger.debug("[chat_channel] handling context: {}".format(context))
         # reply的构建步骤
         reply = self._generate_reply(context)
@@ -189,6 +221,8 @@ class ChatChannel(Channel):
 
             # reply的发送步骤
             self._send_reply(context, reply)
+            if external_id:
+                runtime_client.log_message(external_id, session_key, channel_type, "assistant", str(reply.type).split(".")[-1].lower(), str(reply.content))
 
     def _generate_reply(self, context: Context, reply: Reply = Reply()) -> Reply:
         e_context = PluginManager().emit_event(
@@ -235,6 +269,13 @@ class ChatChannel(Channel):
                     "path": context.content,
                     "msg": context.get("msg")
                 }
+                cmsg = context.get("msg")
+                external_id = getattr(cmsg, "other_user_id", None) if cmsg else None
+                channel_type = context.get("channel_type", "unknown")
+                if external_id:
+                    runtime_client.add_event(external_id, context.get("session_id"), "photo_received")
+                    runtime_client.upload_photo(external_id, context.get("session_id"), channel_type, context.content)
+                    return Reply(ReplyType.TEXT, "收到啦宝子～我这边提交审核，1–3 天审核出结果通知你～")
             elif context.type == ContextType.SHARING:  # 分享信息，当前无默认逻辑
                 pass
             elif context.type == ContextType.FUNCTION or context.type == ContextType.FILE:  # 文件消息及函数调用等，当前无默认逻辑
