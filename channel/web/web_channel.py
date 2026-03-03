@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import uuid
+import requests
 from queue import Queue, Empty
 
 import web
@@ -312,6 +313,12 @@ class WebChannel(ChatChannel):
             '/api/scheduler', 'SchedulerHandler',
             '/api/history', 'HistoryHandler',
             '/api/logs', 'LogsHandler',
+            '/api/recruit/overview', 'RecruitOverviewHandler',
+            '/api/recruit/candidates', 'RecruitCandidatesHandler',
+            '/api/recruit/candidates/(\d+)', 'RecruitCandidateDetailHandler',
+            '/api/recruit/prompts', 'RecruitPromptsHandler',
+            '/api/recruit/prompts/publish', 'RecruitPromptPublishHandler',
+            '/api/recruit/prompts/rollback', 'RecruitPromptRollbackHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
@@ -1090,6 +1097,136 @@ class LogsHandler:
                 return
 
         return generate()
+
+
+class RecruitMCPProxy:
+    _token = None
+
+    @classmethod
+    def _base_url(cls):
+        return os.getenv("MCP_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
+
+    @classmethod
+    def _auth_headers(cls):
+        if cls._token:
+            return {"Authorization": f"Bearer {cls._token}"}
+        username = os.getenv("DASHBOARD_ADMIN_USER", "admin")
+        password = os.getenv("DASHBOARD_ADMIN_PASS", "admin123")
+        resp = requests.post(f"{cls._base_url()}/auth/login", json={"username": username, "password": password}, timeout=8)
+        resp.raise_for_status()
+        cls._token = resp.json().get("access_token")
+        return {"Authorization": f"Bearer {cls._token}"}
+
+    @classmethod
+    def request(cls, method: str, path: str, **kwargs):
+        url = f"{cls._base_url()}{path}"
+        headers = kwargs.pop("headers", {})
+        auth_headers = cls._auth_headers()
+        auth_headers.update(headers)
+        resp = requests.request(method, url, headers=auth_headers, timeout=10, **kwargs)
+        if resp.status_code == 401:
+            cls._token = None
+            auth_headers = cls._auth_headers()
+            resp = requests.request(method, url, headers=auth_headers, timeout=10, **kwargs)
+        resp.raise_for_status()
+        return resp
+
+
+class RecruitOverviewHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            overview = RecruitMCPProxy.request('GET', '/metrics/overview').json()
+            funnel = RecruitMCPProxy.request('GET', '/metrics/funnel').json()
+            return json.dumps({"status": "success", "overview": overview, "funnel": funnel}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit overview error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitCandidatesHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            p = web.input(status='', city='', has_photo='', q='', limit='20', offset='0')
+            params = {"limit": p.limit, "offset": p.offset}
+            if p.status: params["status"] = p.status
+            if p.city: params["city"] = p.city
+            if p.q: params["q"] = p.q
+            if p.has_photo in ('true','false'): params["has_photo"] = p.has_photo
+            data = RecruitMCPProxy.request('GET', '/candidates', params=params).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit candidates error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitCandidateDetailHandler:
+    def GET(self, candidate_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            data = RecruitMCPProxy.request('GET', f'/candidates/{candidate_id}').json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit candidate detail error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    def POST(self, candidate_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or '{}')
+            status = body.get('status')
+            notes = body.get('notes')
+            if not status:
+                return json.dumps({"status": "error", "message": "status required"}, ensure_ascii=False)
+            data = RecruitMCPProxy.request('PATCH', f'/candidates/{candidate_id}/status', json={"status": status, "notes": notes}).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit candidate update error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitPromptsHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            data = RecruitMCPProxy.request('GET', '/prompts').json()
+            return json.dumps({"status": "success", "items": data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompts error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitPromptPublishHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or '{}')
+            version = body.get('version')
+            content = body.get('content')
+            published_by = body.get('published_by', os.getenv('DASHBOARD_ADMIN_USER', 'admin'))
+            if not version or not content:
+                return json.dumps({"status": "error", "message": "version and content required"}, ensure_ascii=False)
+            data = RecruitMCPProxy.request('POST', '/prompts/publish', json={"version": version, "content": content, "published_by": published_by}).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt publish error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitPromptRollbackHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or '{}')
+            version = body.get('version')
+            if not version:
+                return json.dumps({"status": "error", "message": "version required"}, ensure_ascii=False)
+            data = RecruitMCPProxy.request('POST', '/prompts/rollback', json={"version": version}).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt rollback error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 
 class AssetsHandler:
