@@ -16,7 +16,8 @@ const I18N = {
         nav_chat: '对话', nav_manage: '管理', nav_monitor: '监控',
         menu_chat: '对话', menu_config: '配置', menu_skills: '技能',
         menu_memory: '记忆', menu_channels: '通道', menu_tasks: '定时',
-        menu_logs: '日志',
+        menu_logs: '日志', menu_recruit: '招募看板',
+        recruit_title: '招募看板', recruit_desc: '候选人概览、状态管理与 Prompt 版本管理',
         welcome_subtitle: '我可以帮你解答问题、管理计算机、创造和执行技能，并通过长期记忆<br>不断成长',
         example_sys_title: '系统管理', example_sys_text: '帮我查看工作空间里有哪些文件',
         example_task_title: '智能任务', example_task_text: '提醒我5分钟后查看服务器情况',
@@ -62,7 +63,8 @@ const I18N = {
         nav_chat: 'Chat', nav_manage: 'Management', nav_monitor: 'Monitor',
         menu_chat: 'Chat', menu_config: 'Config', menu_skills: 'Skills',
         menu_memory: 'Memory', menu_channels: 'Channels', menu_tasks: 'Tasks',
-        menu_logs: 'Logs',
+        menu_logs: 'Logs', menu_recruit: 'Recruit Dashboard',
+        recruit_title: 'Recruit Dashboard', recruit_desc: 'Candidates overview, status operations, and prompt versioning',
         welcome_subtitle: 'I can help you answer questions, manage your computer, create and execute skills, and keep growing through <br> long-term memory.',
         example_sys_title: 'System', example_sys_text: 'Show me the files in the workspace',
         example_task_title: 'Smart Task', example_task_text: 'Remind me to check the server in 5 minutes',
@@ -167,6 +169,7 @@ const VIEW_META = {
     channels: { group: 'nav_manage',  page: 'menu_channels' },
     tasks:    { group: 'nav_manage',  page: 'menu_tasks' },
     logs:     { group: 'nav_monitor', page: 'menu_logs' },
+    recruit:  { group: 'nav_manage',  page: 'menu_recruit' },
 };
 
 let currentView = 'chat';
@@ -1828,6 +1831,121 @@ function stopLogStream() {
     }
 }
 
+
+
+// =====================================================================
+// Recruit Dashboard
+// =====================================================================
+let recruitCurrentCandidateId = null;
+
+function recruitApi(path, options = {}) {
+    return fetch('/api/recruit' + path, options).then(r => r.json());
+}
+
+function renderRecruitCandidates(items) {
+    const tbody = document.getElementById('recruit-candidates-tbody');
+    tbody.innerHTML = (items || []).map(i => `
+      <tr class="border-b border-slate-200 dark:border-white/10">
+        <td class="py-2">${i.id}</td><td>${escapeHtml(i.nickname || '')}</td><td>${escapeHtml(i.city || '')}</td><td>${escapeHtml(i.status || '')}</td>
+        <td><button class="text-blue-500" onclick="loadRecruitCandidateDetail(${i.id})">查看</button></td>
+      </tr>`).join('');
+}
+
+function loadRecruitOverview() {
+    recruitApi('/overview').then(data => {
+        if (data.status !== 'success') return;
+        const o = data.overview || {};
+        document.getElementById('recruit-kpi-new').textContent = o.today_new_candidates ?? '-';
+        document.getElementById('recruit-kpi-photo').textContent = o.today_photo_candidates ?? '-';
+        document.getElementById('recruit-kpi-rate').textContent = `${o.today_photo_conversion_rate ?? '-'}%`;
+    });
+}
+
+function loadRecruitCandidates() {
+    recruitApi('/candidates?limit=50&offset=0').then(data => {
+        if (data.status !== 'success') return;
+        renderRecruitCandidates(data.items || []);
+    });
+}
+
+function loadRecruitPrompts() {
+    recruitApi('/prompts').then(data => {
+        const el = document.getElementById('recruit-prompts');
+        if (data.status !== 'success') { el.innerHTML = '<li>加载失败</li>'; return; }
+        el.innerHTML = (data.items || []).map(p => `<li>${escapeHtml(p.version)} ${p.is_active ? '(生效中)' : ''} <button class="text-amber-500" onclick="rollbackRecruitPrompt('${p.version}')">回滚</button></li>`).join('');
+    });
+}
+
+function loadRecruitCandidateDetail(id) {
+    recruitCurrentCandidateId = id;
+    recruitApi(`/candidates/${id}`).then(data => {
+        if (data.status !== 'success') return;
+        document.getElementById('recruit-detail-empty').classList.add('hidden');
+        document.getElementById('recruit-detail').classList.remove('hidden');
+        const c = data.candidate || {};
+        document.getElementById('recruit-detail-base').textContent = `#${c.id} ${c.nickname || ''} ${c.city || ''}`;
+        document.getElementById('recruit-status-select').value = c.status || 'pending_photo';
+        document.getElementById('recruit-messages').innerHTML = (data.messages || []).map(m => `<li>[${escapeHtml(m.sender || '')}] ${escapeHtml(m.message_type || '')}: ${escapeHtml(m.content || '')}</li>`).join('');
+        document.getElementById('recruit-photos').innerHTML = (data.photos || []).map(p => `<li><a class="text-blue-500" href="${p.preview_url}" target="_blank">${escapeHtml(p.filename || '')}</a></li>`).join('');
+    });
+}
+
+function saveRecruitCandidateStatus() {
+    if (!recruitCurrentCandidateId) return;
+    const status = document.getElementById('recruit-status-select').value;
+    recruitApi(`/candidates/${recruitCurrentCandidateId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status })
+    }).then(() => {
+        loadRecruitCandidates();
+        loadRecruitCandidateDetail(recruitCurrentCandidateId);
+    });
+}
+
+function publishRecruitPrompt() {
+    const version = document.getElementById('recruit-prompt-version').value.trim();
+    const content = document.getElementById('recruit-prompt-content').value.trim();
+    if (!version || !content) return;
+    recruitApi('/prompts/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version, content })
+    }).then(loadRecruitPrompts);
+}
+
+function rollbackRecruitPrompt(version) {
+    recruitApi('/prompts/rollback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version })
+    }).then(loadRecruitPrompts);
+}
+
+function loadRecruitView() {
+    loadRecruitOverview();
+    loadRecruitCandidates();
+    loadRecruitPrompts();
+    const refreshBtn = document.getElementById('recruit-refresh-btn');
+    if (refreshBtn && !refreshBtn.dataset.bound) {
+        refreshBtn.addEventListener('click', () => {
+            loadRecruitOverview();
+            loadRecruitCandidates();
+        });
+        refreshBtn.dataset.bound = '1';
+    }
+    const saveBtn = document.getElementById('recruit-status-save-btn');
+    if (saveBtn && !saveBtn.dataset.bound) {
+        saveBtn.addEventListener('click', saveRecruitCandidateStatus);
+        saveBtn.dataset.bound = '1';
+    }
+    const publishBtn = document.getElementById('recruit-publish-btn');
+    if (publishBtn && !publishBtn.dataset.bound) {
+        publishBtn.addEventListener('click', publishRecruitPrompt);
+        publishBtn.dataset.bound = '1';
+    }
+}
+
 // =====================================================================
 // View Navigation Hook
 // =====================================================================
@@ -1850,6 +1968,7 @@ navigateTo = function(viewId) {
     else if (viewId === 'channels') loadChannelsView();
     else if (viewId === 'tasks') loadTasksView();
     else if (viewId === 'logs') startLogStream();
+    else if (viewId === 'recruit') loadRecruitView();
 };
 
 // =====================================================================

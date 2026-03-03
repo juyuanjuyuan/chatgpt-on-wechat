@@ -120,6 +120,11 @@
                             <i class="fas fa-clock item-icon text-xs w-5 text-center"></i>
                             <span data-i18n="menu_tasks">Tasks</span>
                         </a>
+                        <a class="sidebar-item flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 hover:bg-white/5 hover:text-neutral-200 text-[14px]"
+                           data-view="recruit">
+                            <i class="fas fa-users item-icon text-xs w-5 text-center"></i>
+                            <span data-i18n="menu_recruit">Recruit Dashboard</span>
+                        </a>
                     </div>
                 </div>
 
@@ -581,6 +586,66 @@
                                 <p class="text-slate-500 dark:text-slate-400 font-medium">Loading...</p>
                             </div>
                             <div id="tasks-list" class="grid gap-4 hidden"></div>
+                        </div>
+                    </div>
+                </div>
+
+                
+                <!-- ====================================================== -->
+                <!-- VIEW: Recruit Dashboard                               -->
+                <!-- ====================================================== -->
+                <div id="view-recruit" class="view">
+                    <div class="flex-1 overflow-y-auto p-6">
+                        <div class="max-w-6xl mx-auto space-y-6">
+                            <div>
+                                <h2 class="text-xl font-bold text-slate-800 dark:text-slate-100" data-i18n="recruit_title">Recruit Dashboard</h2>
+                                <p class="text-sm text-slate-500 dark:text-slate-400 mt-1" data-i18n="recruit_desc">候选人概览、状态管理与 Prompt 版本管理</p>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div class="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-4"><p class="text-xs text-slate-500">今日新增</p><p id="recruit-kpi-new" class="text-2xl font-semibold">-</p></div>
+                                <div class="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-4"><p class="text-xs text-slate-500">今日发照人数</p><p id="recruit-kpi-photo" class="text-2xl font-semibold">-</p></div>
+                                <div class="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-4"><p class="text-xs text-slate-500">发照转化率</p><p id="recruit-kpi-rate" class="text-2xl font-semibold">-</p></div>
+                            </div>
+
+                            <div class="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-3">
+                                    <h3 class="font-semibold">候选人列表</h3>
+                                    <button id="recruit-refresh-btn" class="px-3 py-1.5 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 text-sm">刷新</button>
+                                </div>
+                                <div class="overflow-x-auto">
+                                    <table class="min-w-full text-sm">
+                                        <thead><tr class="text-left border-b border-slate-200 dark:border-white/10"><th class="py-2">ID</th><th>昵称</th><th>城市</th><th>状态</th><th>操作</th></tr></thead>
+                                        <tbody id="recruit-candidates-tbody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                <div class="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-4">
+                                    <h3 class="font-semibold mb-2">候选人详情</h3>
+                                    <div id="recruit-detail-empty" class="text-sm text-slate-500">点击列表“查看”加载详情</div>
+                                    <div id="recruit-detail" class="hidden space-y-2">
+                                        <p id="recruit-detail-base" class="text-sm"></p>
+                                        <label class="text-sm">状态</label>
+                                        <select id="recruit-status-select" class="w-full rounded border border-slate-300 dark:border-white/10 bg-transparent p-2 text-sm">
+                                            <option value="pending_photo">pending_photo</option><option value="pending_review">pending_review</option><option value="reviewing">reviewing</option><option value="passed">passed</option><option value="rejected">rejected</option><option value="blacklisted">blacklisted</option><option value="underage_terminated">underage_terminated</option><option value="need_more_photo">need_more_photo</option>
+                                        </select>
+                                        <button id="recruit-status-save-btn" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm">保存状态</button>
+                                        <div><h4 class="font-medium">消息</h4><ul id="recruit-messages" class="text-xs space-y-1 max-h-40 overflow-auto"></ul></div>
+                                        <div><h4 class="font-medium">照片</h4><ul id="recruit-photos" class="text-xs space-y-1"></ul></div>
+                                    </div>
+                                </div>
+
+                                <div class="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-4">
+                                    <h3 class="font-semibold mb-2">Prompt 管理</h3>
+                                    <div class="space-y-2">
+                                        <input id="recruit-prompt-version" class="w-full rounded border border-slate-300 dark:border-white/10 bg-transparent p-2 text-sm" placeholder="版本号，如 v2" />
+                                        <textarea id="recruit-prompt-content" rows="6" class="w-full rounded border border-slate-300 dark:border-white/10 bg-transparent p-2 text-sm" placeholder="输入新版 Prompt"></textarea>
+                                        <button id="recruit-publish-btn" class="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm">发布</button>
+                                    </div>
+                                    <ul id="recruit-prompts" class="mt-3 text-xs space-y-2"></ul>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
