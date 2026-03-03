@@ -27,7 +27,3 @@
 
 7. **补充最小策略单元测试**
    - 方案：新增 `tests/test_cowagent_runtime.py` 验证未成年识别、拒绝识别、拒绝计数阈值。
-
-8. **招募看板并入原生 Web Console**
-   - 原因：避免维护两套入口，降低运营使用复杂度。
-   - 方案：在 `channel/web` 增加 Recruit 视图与 `/api/recruit/*` 代理接口，对接 MCP。
