@@ -41,6 +41,7 @@ Web Console Recruit 视图 / 独立 Dashboard -> MCP API Server
 | `mcp_api_server/alembic/` | Postgres 迁移脚本。 |
 | `dashboard/` | 独立 Next.js 看板（可选入口）。 |
 | `prompts/recruiter_v1.md` | 默认“北北”Prompt v1 文本。 |
+| `prompts/candidate_profile_extractor.md` | 静默会话资料抽取 Prompt，要求返回 JSON。 |
 | `docs/ARCHITECTURE.md` | 改造架构/数据流说明。 |
 | `docs/DECISIONS.md` | 关键工程决策记录（必须持续追加）。 |
 | `docker-compose.yml` | 本地一键部署编排。 |
@@ -83,11 +84,15 @@ Web Console Recruit 视图 / 独立 Dashboard -> MCP API Server
   2) `console.js` 加 `VIEW_META` 路由与懒加载
   3) 后端 `web_channel.py` 增加 `/api/*` 处理器
 - 避免重复绑定事件（使用 dataset 标记或初始化开关）。
+- 招募看板当前已带自动刷新；若继续调整刷新逻辑，务必在离开 `recruit` 视图时停止 timer，避免后台重复请求。
+- 招募状态展示统一在前端映射为中文业务语义：`pending_photo` => `未发送照片`，`pending_review` => `已发送照片`；不要直接把中文状态值写入数据库。
 
 ### MCP API（FastAPI）
 - 新接口默认考虑鉴权与权限（admin / readonly）。
 - 媒体访问必须受控（token 或签名方式）。
 - 新字段变更必须配套 Alembic migration。
+- 资料抽取属于 MCP 业务边界，统一放在 `mcp_api_server/app/main.py` + `mcp_api_server/app/profile_extraction.py`，不要把“从历史会话提取 nickname/city/status”的逻辑再塞回 channel。
+- 候选人资料抽取要求 AI 返回严格 JSON，并在服务端做状态白名单映射与容错；即使模型输出中文状态，也必须先映射回内部 ASCII 枚举再落库。
 
 ---
 
@@ -110,6 +115,7 @@ Web Console Recruit 视图 / 独立 Dashboard -> MCP API Server
 
 ```bash
 python -m unittest tests/test_cowagent_runtime.py
+python -m unittest tests/test_candidate_profile_extraction.py
 python -m compileall mcp_api_server/app channel/web/web_channel.py common/cowagent_runtime.py
 ```
 
@@ -137,6 +143,10 @@ python -m compileall mcp_api_server/app channel/web/web_channel.py common/cowage
 3. **重复事件绑定**：多次进入视图会触发重复请求/重复提交。
 4. **会话/候选人ID混淆**：`session_key` 与 `candidate_id` 概念不要混用。
 5. **图片 URL 泄露**：日志中不要打印可直接访问的原图敏感链接。
+6. **MCP_BASE_URL 部署场景**：宿主机直接运行 `python app.py` 时，`MCP_BASE_URL` 默认 `http://127.0.0.1:8001`；Docker 内 `agent-runtime` 使用 `http://mcp-api-server:8001`。宿主机跑 app 时若 MCP 不可达，会出现 `Name or service not known` 的 WARNING。
+7. **招募看板图片显示**：图片消息需经 `upload_photo` 成功入库才有 `media_asset_id`；`log_message` 对 image/voice/video/file 存 `[图片]` 等标签，不存临时路径；Web Console 通过 `/api/recruit/media/{asset_id}` 代理访问 MCP 媒体，`console.js` 对 `message_type===image` 且 `media_asset_id` 存在时渲染 `<img>`。
+8. **资料抽取触发条件**：当前静默资料抽取只针对企微渠道且状态为 `pending_photo` 的候选人；一旦状态进入 `pending_review`（已发送照片）及后续审核态，就不会继续触发。
+9. **抽取逻辑回归风险**：`nickname` / `city` / `status` 的规则测试应优先放在纯工具模块，避免单测因为本地缺少 `fastapi` / `sqlalchemy` 而无法运行。
 
 ---
 
@@ -147,6 +157,7 @@ python -m compileall mcp_api_server/app channel/web/web_channel.py common/cowage
 | MCP 接口、鉴权、状态流变化 | `README_COWAGENT.md` + `docs/DECISIONS.md` |
 | 数据表/字段/索引变化 | `README_COWAGENT.md` + Alembic 脚本 + `docs/DECISIONS.md` |
 | Runtime 规则变化（未成年/拒绝/prompt策略） | `docs/DECISIONS.md` + 对应测试 |
+| 静默资料抽取规则 / 状态映射变化 | `README_COWAGENT.md` + `docs/DECISIONS.md` + 对应测试 |
 | Web Console 视图与交互变化 | `README_COWAGENT.md`（入口/用法） |
 | 新增环境变量 | `.env.example` + `README_COWAGENT.md` |
 

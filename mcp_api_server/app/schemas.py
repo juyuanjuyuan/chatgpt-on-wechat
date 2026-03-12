@@ -1,6 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel
-from typing import Optional, Any
+from typing import Any, Optional
 
 
 class LoginRequest(BaseModel):
@@ -63,3 +63,71 @@ class PromptOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PromptExampleCreate(BaseModel):
+    context_summary: str
+    correct_response: str
+    source: str = "manual"
+
+
+class PromptExampleUpdate(BaseModel):
+    context_summary: Optional[str] = None
+    correct_response: Optional[str] = None
+
+
+class PromptExampleReview(BaseModel):
+    is_reviewed: bool
+
+
+class FollowupMessageOut(BaseModel):
+    sender: str
+    content: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PendingFollowupConversation(BaseModel):
+    conversation_id: int
+    session_key: str
+    channel: str
+    candidate_id: int
+    external_id: str
+    nickname: Optional[str] = None
+    last_active_at: datetime
+    followup_count: int
+    recent_messages: list[FollowupMessageOut]
+
+    class Config:
+        from_attributes = True
+
+
+class PendingProfileExtractionConversation(BaseModel):
+    conversation_id: int
+    session_key: str
+    channel: str
+    candidate_id: int
+    external_id: str
+    nickname: Optional[str] = None
+    status: str
+    status_label: str
+    last_active_at: datetime
+    recent_messages: list[FollowupMessageOut]
+
+    class Config:
+        from_attributes = True
+
+
+class CandidateProfileExtractionOut(BaseModel):
+    conversation_id: int
+    candidate_id: int
+    external_id: str
+    updated: bool
+    nickname: Optional[str] = None
+    city: Optional[str] = None
+    status: str
+    status_label: str
+    confidence: Optional[str] = None
+    reason: Optional[str] = None

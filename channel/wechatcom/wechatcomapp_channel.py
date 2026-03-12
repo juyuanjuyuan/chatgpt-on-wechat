@@ -200,6 +200,9 @@ class Query:
             except NotImplementedError as e:
                 logger.debug("[wechatcom] " + str(e))
                 return "success"
+            # 确保语音/图片等媒体消息在进入 ChatChannel 前已下载到本地，
+            # 这样后续 CowAgent 的 upload_photo 才能读取到文件并上传到 MCP。
+            wechatcom_msg.prepare()
             context = channel._compose_context(
                 wechatcom_msg.ctype,
                 wechatcom_msg.content,

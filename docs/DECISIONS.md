@@ -27,3 +27,60 @@
 
 7. **补充最小策略单元测试**
    - 方案：新增 `tests/test_cowagent_runtime.py` 验证未成年识别、拒绝识别、拒绝计数阈值。
+
+## 2026-03-04
+
+8. **训练语料（ICL Prompt Examples）系统**
+   - 原因：运营需要快速纠正 AI 客服的不当回复，而无需重写整个 Prompt。
+   - 方案：新增 `prompt_examples` 表，存储 (上下文摘要, 确定回复) 对。审核通过的条目在 `GET /prompts/current` 时自动追加到基础 prompt 末尾，作为 in-context learning 补充。
+   - 数据流：Web Console → MCP API CRUD → DB；Runtime 通过已有的 `/prompts/current` 端点获取组装后的完整 prompt，无需改动 bot 层。
+   - 迁移：`0002_prompt_examples`。
+
+## 2026-03-06
+
+9. **自动跟进调度系统（Auto Followup Scheduler）**
+   - 原因：AI 客服只能被动回复，无法主动跟进沉默候选人，导致 pending_photo 对话容易"聊死"，降低发照转化率。
+   - 方案：后台定时调度器（默认每 1 小时）扫描 `pending_photo` 状态的对话，用独立 AI 调用（不污染原会话上下文）评估是否需要跟进，若需要则生成跟进消息并通过原通道主动推送。
+   - 过滤条件：最后消息发送者为 assistant、静默超过可配置阈值（默认 2h）、跟进次数未达上限（默认 3 次）。
+   - 跟进次数通过 `events` 表 `auto_followup` 事件类型追踪，不新增列。
+   - `conversations` 表新增 `last_active_at` 字段提升查询效率，`POST /messages` 时自动更新。
+   - 跟进消息发送后同步追加到 Session 内存，保证候选人回复时对话连贯。
+   - 新增配置项：`FOLLOWUP_ENABLED`、`FOLLOWUP_INTERVAL_SECONDS`、`FOLLOWUP_MIN_IDLE_HOURS`、`FOLLOWUP_MAX_ATTEMPTS`。
+   - 迁移：`0003_conversations_last_active`。
+
+10. **Session 过期后自动从 MCP 恢复对话历史**
+    - 现象：企微用户间隔超过 `expires_in_seconds`（默认 3600s）未互动后，内存中 `ExpiredDict` 清除 session，AI 丢失上下文重复提问（姓名、城市等）。
+    - 方案：在 `ChatGPTBot.reply()` 中检测 session 是否为刚重建（仅含 system prompt），若是则调用 `GET /conversations/history?session_key=xxx` 从 PostgreSQL 加载该会话的完整历史消息并注入 session，随后正常走 `discard_exceeding` 裁剪。
+    - 效果：即使内存 session 过期，只要 MCP 有持久化记录，对话上下文就不会丢失。
+    - 涉及文件：`mcp_api_server/app/main.py`（新端点）、`common/cowagent_runtime.py`（新方法）、`models/chatgpt/chat_gpt_bot.py`（恢复逻辑）。
+
+## 2026-03-09
+
+11. **候选人资料在 MCP 侧静默抽取**
+    - 原因：`nickname` / `city` / `status` 之前主要依赖通道入口的即时字段，城市缺少稳定来源，导致招募看板经常出现空信息。
+    - 方案：在 MCP API 内新增独立资料抽取逻辑，基于 `Conversation.last_active_at` 判断企微会话静默满 20 分钟后，读取该会话历史消息并调用独立 AI prompt 输出 JSON，回写候选人资料。
+    - 边界：资料抽取不放回 channel 层，统一由 MCP 负责历史组装、JSON 校验、状态映射与落库，结果通过 `candidate_profile_extracted` 事件留痕。
+    - 过滤：仅对 `pending_photo` 候选人触发；进入 `pending_review`（已发送照片）及后续审核状态后停止继续抽取。
+
+12. **保留英文枚举，前端显示中文状态语义**
+    - 原因：数据库和现有代码路径已依赖 `pending_photo` / `pending_review` 等 ASCII 状态值，直接改 Enum 会扩大迁移面并影响兼容性。
+    - 方案：内部状态枚举保持不变，Web Console 与 MCP 返回统一中文 label，其中 `pending_photo` 展示为 `未发送照片`，`pending_review` 展示为 `已发送照片`。
+    - 结果：无需新增状态迁移即可完成业务语义更新，同时保留对审核流和历史数据的兼容。
+
+13. **招募看板从一次性表格页升级为自动刷新的运营面板**
+    - 原因：原页面样式偏 MVP，且接口失败时容易表现为“字段没显示”，不利于运营判断系统状态。
+    - 方案：升级为 KPI 卡片 + 数据表 + 详情面板布局，增加状态 badge、空态/错误态与自动刷新提示，并在页面停留期间定时刷新概览、候选人列表和当前详情。
+
+14. **`v1` 激活 Prompt 以仓库文件为准**
+   - 原因：运营和开发当前直接在 `prompts/recruiter_v1.md` 中维护“北北”主 Prompt，希望在线企微对话拿到的主 system prompt 与仓库文件保持一致，避免数据库中旧版 `v1` 文本与本地文件脱节。
+   - 方案：当 MCP 当前激活的 prompt 版本为 `v1` 时，`GET /prompts/current` 直接读取 `prompts/recruiter_v1.md` 作为主 Prompt，再在同一个 system prompt 末尾拼接所有已审核通过的训练语料；非 `v1` 版本仍使用数据库中发布的内容。
+
+15. **定时任务开关与 env 解析统一**
+   - 现象：跟进（每小时）与资料抽取（每 5 分钟扫描、静默 20 分钟后抽取）有时不触发，或配置了 PROFILE_EXTRACTION_ENABLED=1/yes 仍不生效。
+   - 原因：`FollowupScheduler` 内 `_profile_enabled` 仅接受字面量 `"true"`，与 app 启动条件（接受 1/true/yes）不一致；未根据 `FOLLOWUP_ENABLED` 门控跟进任务；本地运行未加载项目根目录 `.env`；Docker 未传入调度相关环境变量。
+
+16. **招募看板发照转化率改为历史口径**
+   - 原因：以“今日新增”为分母的转化率在冷启动或低流量时波动大，运营更关注整体转化表现。
+   - 方案：`GET /metrics/overview` 新增 `photo_conversion_rate`，计算方式为（历史上曾发照的候选人数 / 历史进入流程的候选人数）× 100；保留 `today_photo_conversion_rate` 与今日相关字段供其他场景使用。Web Console 招募看板展示 `photo_conversion_rate`，文案改为“历史进入流程的候选人中已发照的比例”。
+   - 补充：已发照人数按**候选人状态**统计（status 为 pending_review、reviewing、passed、rejected、need_more_photo），不再按 MediaAsset 表统计，避免仅更新了状态为“已发送照片”但未写入 media_assets 的候选人被漏计导致转化率显示 0%。
+   - 方案：新增 `_env_bool()` 统一解析 1/true/yes；增加 `_followup_enabled` 仅当为 true 时执行跟进；`app.py` 启动时加载项目根 `.env`；docker-compose 的 agent-runtime 显式传入 FOLLOWUP_* / PROFILE_EXTRACTION_*；未启用时打日志说明需设置上述 env 方可启动调度器。

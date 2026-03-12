@@ -41,6 +41,7 @@ class Conversation(Base):
     channel = Column(String(64), nullable=False)
     session_key = Column(String(128), nullable=False, unique=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_active_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Message(Base):
@@ -103,6 +104,19 @@ class Prompt(Base):
     published_by = Column(String(64), nullable=False)
     effective_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class PromptExample(Base):
+    __tablename__ = "prompt_examples"
+
+    id = Column(Integer, primary_key=True)
+    context_summary = Column(Text, nullable=False)
+    correct_response = Column(Text, nullable=False)
+    source = Column(String(32), nullable=False, default="manual")
+    is_reviewed = Column(Boolean, nullable=False, default=False, index=True)
+    created_by = Column(String(64), nullable=False, default="admin")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class UserRole(str, enum.Enum):

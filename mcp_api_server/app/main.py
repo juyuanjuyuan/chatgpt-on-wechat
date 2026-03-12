@@ -2,7 +2,7 @@ import csv
 import io
 import os
 import secrets
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -14,8 +14,20 @@ from sqlalchemy.orm import Session
 
 from .auth import create_token, get_current_user, hash_password, require_admin, verify_password
 from .database import get_db
-from .models import Candidate, CandidateStatus, Conversation, Event, MediaAsset, Message, Prompt, User, UserRole
-from .schemas import CandidateUpsert, EventCreate, LoginRequest, MessageCreate, PromptPublish, PromptRollback, ReviewUpdate, TokenResponse
+from .models import Candidate, CandidateStatus, Conversation, Event, MediaAsset, Message, Prompt, PromptExample, User, UserRole
+from .profile_extraction import (
+    PROFILE_EXTRACTION_EVENT_TYPE,
+    candidate_status_label,
+    get_profile_extraction_channels,
+    is_profile_extraction_candidate_status,
+    run_profile_extraction,
+)
+from .schemas import (
+    CandidateProfileExtractionOut, CandidateUpsert, EventCreate, FollowupMessageOut,
+    LoginRequest, MessageCreate, PendingFollowupConversation,
+    PendingProfileExtractionConversation, PromptExampleCreate, PromptExampleReview,
+    PromptExampleUpdate, PromptPublish, PromptRollback, ReviewUpdate, TokenResponse,
+)
 
 app = FastAPI(title="CowAgent MCP API", version="0.1.0")
 app.add_middleware(
@@ -28,6 +40,41 @@ app.add_middleware(
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./data/media"))
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_TOKEN = os.getenv("MEDIA_TOKEN", "media-secret")
+
+
+def resolve_prompt_path(filename: str) -> Path:
+    current = Path(__file__).resolve()
+    candidates = [
+        current.parents[2] / "prompts" / filename,  # repo layout
+        current.parents[1] / "prompts" / filename,  # container layout (/app/app -> /app/prompts)
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def load_default_recruiter_prompt() -> str:
+    prompt_path = resolve_prompt_path("recruiter_v1.md")
+    try:
+        return prompt_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load recruiter_v1.md: {exc}") from exc
+
+
+def build_current_prompt_content(version: str, prompt_content: str, examples: list[PromptExample]) -> str:
+    # Keep v1 aligned with the repository prompt file so local edits become
+    # the active system prompt without requiring a separate publish step.
+    if version == "v1":
+        content = load_default_recruiter_prompt()
+    else:
+        content = (prompt_content or "").strip()
+    if examples:
+        parts = ["\n\n## 补充回复规范\n\n当遇到类似以下场景时，请参考对应的回复方式：\n"]
+        for i, ex in enumerate(examples, 1):
+            parts.append(f"### 场景 {i}\n用户问: \"{ex.context_summary}\"\n你应该回复: \"{ex.correct_response}\"\n")
+        content += "\n".join(parts)
+    return content
 
 
 def ensure_candidate(db: Session, external_id: str) -> Candidate:
@@ -107,6 +154,7 @@ def list_candidates(
                 "nickname": c.nickname,
                 "city": c.city,
                 "status": c.status.value,
+                "status_label": candidate_status_label(c.status),
                 "refusal_count": c.refusal_count,
                 "created_at": c.created_at,
             }
@@ -122,6 +170,7 @@ def get_candidate_detail(candidate_id: int, db: Session = Depends(get_db), user=
         raise HTTPException(404, "Not found")
     convs = db.query(Conversation).filter(Conversation.candidate_id == candidate_id).all()
     conv_ids = [x.id for x in convs]
+    last_active_at = max((conv.last_active_at for conv in convs if conv.last_active_at), default=None)
     msgs = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).order_by(Message.created_at.asc()).all() if conv_ids else []
     media = db.query(MediaAsset).filter(MediaAsset.candidate_id == candidate_id).order_by(MediaAsset.created_at.desc()).all()
     return {
@@ -133,11 +182,16 @@ def get_candidate_detail(candidate_id: int, db: Session = Depends(get_db), user=
             "live_experience": c.live_experience,
             "platform": c.platform,
             "status": c.status.value,
+            "status_label": candidate_status_label(c.status),
             "notes": c.notes,
             "refusal_count": c.refusal_count,
+            "last_active_at": last_active_at,
         },
         "messages": [
-            {"id": m.id, "sender": m.sender, "message_type": m.message_type, "content": m.content, "created_at": m.created_at}
+            {
+                "id": m.id, "sender": m.sender, "message_type": m.message_type, "content": m.content, "created_at": m.created_at,
+                **({"media_asset_id": m.media_asset_id, "preview_url": f"/media/{m.media_asset_id}?token={MEDIA_TOKEN}"} if m.media_asset_id else {}),
+            }
             for m in msgs
         ],
         "photos": [
@@ -178,8 +232,35 @@ def append_message(payload: MessageCreate, db: Session = Depends(get_db)):
         content=payload.content,
     )
     db.add(m)
+    conv.last_active_at = func.now()
     db.commit()
     return {"id": m.id, "candidate_id": c.id, "conversation_id": conv.id}
+
+
+@app.get('/conversations/history')
+def conversation_history(
+    session_key: str = Query(..., description="Session key to look up"),
+    limit: int = Query(40, ge=1, le=200, description="Max messages to return (most recent)"),
+    db: Session = Depends(get_db),
+):
+    conv = db.query(Conversation).filter(Conversation.session_key == session_key).first()
+    if not conv:
+        return {"messages": []}
+    msgs = (
+        db.query(Message)
+        .filter(Message.conversation_id == conv.id)
+        .order_by(Message.id.desc())
+        .limit(limit)
+        .all()
+    )
+    msgs.reverse()
+    return {
+        "messages": [
+            {"sender": m.sender, "content": m.content}
+            for m in msgs
+            if m.content
+        ]
+    }
 
 
 @app.get('/conversations')
@@ -188,6 +269,225 @@ def list_conversations(page: int = 1, page_size: int = 20, db: Session = Depends
     total = q.count()
     rows = q.order_by(Conversation.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
     return {"total": total, "items": [{"id": r.id, "session_key": r.session_key, "channel": r.channel, "candidate_id": r.candidate_id} for r in rows]}
+
+
+@app.get('/conversations/pending-followup')
+def pending_followup_conversations(
+    min_idle_hours: float = Query(2, description="Minimum hours since last activity"),
+    max_followups: int = Query(3, description="Max auto-followup attempts per conversation"),
+    limit: int = Query(50, description="Max conversations to return"),
+    db: Session = Depends(get_db),
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=min_idle_hours)
+
+    followup_counts = (
+        db.query(Event.conversation_id, func.count(Event.id).label("cnt"))
+        .filter(Event.event_type == "auto_followup")
+        .group_by(Event.conversation_id)
+        .subquery()
+    )
+
+    last_msg = (
+        db.query(
+            Message.conversation_id,
+            Message.sender,
+            func.max(Message.created_at).label("last_at"),
+        )
+        .group_by(Message.conversation_id, Message.sender)
+        .subquery()
+    )
+
+    last_sender_sub = (
+        db.query(
+            Message.conversation_id,
+            Message.sender.label("last_sender"),
+        )
+        .distinct(Message.conversation_id)
+        .order_by(Message.conversation_id, Message.created_at.desc())
+        .subquery()
+    )
+
+    rows = (
+        db.query(Conversation, Candidate, followup_counts.c.cnt)
+        .join(Candidate, Candidate.id == Conversation.candidate_id)
+        .outerjoin(followup_counts, followup_counts.c.conversation_id == Conversation.id)
+        .outerjoin(last_sender_sub, last_sender_sub.c.conversation_id == Conversation.id)
+        .filter(
+            Candidate.status == CandidateStatus.pending_photo,
+            Conversation.last_active_at < cutoff,
+            last_sender_sub.c.last_sender == "assistant",
+        )
+        .filter(
+            (followup_counts.c.cnt == None) | (followup_counts.c.cnt < max_followups)  # noqa: E711
+        )
+        .order_by(Conversation.last_active_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+    result = []
+    for conv, cand, fu_count in rows:
+        msgs = (
+            db.query(Message)
+            .filter(Message.conversation_id == conv.id)
+            .order_by(Message.created_at.desc())
+            .limit(20)
+            .all()
+        )
+        msgs.reverse()
+        result.append(PendingFollowupConversation(
+            conversation_id=conv.id,
+            session_key=conv.session_key,
+            channel=conv.channel,
+            candidate_id=cand.id,
+            external_id=cand.external_id,
+            nickname=cand.nickname,
+            last_active_at=conv.last_active_at,
+            followup_count=fu_count or 0,
+            recent_messages=[
+                FollowupMessageOut(sender=m.sender, content=m.content, created_at=m.created_at)
+                for m in msgs
+            ],
+        ))
+    return result
+
+
+@app.get('/conversations/pending-profile-extraction', response_model=list[PendingProfileExtractionConversation])
+def pending_profile_extraction_conversations(
+    idle_minutes: int = Query(20, ge=1, le=1440, description="Minimum idle minutes before extraction"),
+    limit: int = Query(50, ge=1, le=200, description="Max conversations to return"),
+    db: Session = Depends(get_db),
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_minutes)
+    extraction_events = (
+        db.query(Event.conversation_id, func.max(Event.created_at).label("last_extracted_at"))
+        .filter(Event.event_type == PROFILE_EXTRACTION_EVENT_TYPE)
+        .group_by(Event.conversation_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(Conversation, Candidate, extraction_events.c.last_extracted_at)
+        .join(Candidate, Candidate.id == Conversation.candidate_id)
+        .outerjoin(extraction_events, extraction_events.c.conversation_id == Conversation.id)
+        .filter(
+            Conversation.last_active_at < cutoff,
+            Candidate.status == CandidateStatus.pending_photo,
+        )
+        .filter(
+            (extraction_events.c.last_extracted_at == None) | (extraction_events.c.last_extracted_at < Conversation.last_active_at)  # noqa: E711
+        )
+        .order_by(Conversation.last_active_at.asc())
+    )
+
+    channels = get_profile_extraction_channels()
+    if channels:
+        query = query.filter(Conversation.channel.in_(channels))
+
+    rows = query.limit(limit).all()
+    result = []
+    for conv, cand, _ in rows:
+        msgs = (
+            db.query(Message)
+            .filter(Message.conversation_id == conv.id)
+            .order_by(Message.created_at.desc())
+            .limit(30)
+            .all()
+        )
+        msgs.reverse()
+        result.append(PendingProfileExtractionConversation(
+            conversation_id=conv.id,
+            session_key=conv.session_key,
+            channel=conv.channel,
+            candidate_id=cand.id,
+            external_id=cand.external_id,
+            nickname=cand.nickname,
+            status=getattr(cand.status, "value", cand.status),
+            status_label=candidate_status_label(cand.status),
+            last_active_at=conv.last_active_at,
+            recent_messages=[
+                FollowupMessageOut(sender=m.sender, content=m.content, created_at=m.created_at)
+                for m in msgs
+            ],
+        ))
+    return result
+
+
+@app.post('/conversations/{conversation_id}/extract-profile', response_model=CandidateProfileExtractionOut)
+def extract_candidate_profile(conversation_id: int, db: Session = Depends(get_db)):
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+    cand = db.query(Candidate).filter(Candidate.id == conv.candidate_id).first()
+    if not cand:
+        raise HTTPException(404, "Candidate not found")
+    if not is_profile_extraction_candidate_status(cand.status):
+        return CandidateProfileExtractionOut(
+            conversation_id=conv.id,
+            candidate_id=cand.id,
+            external_id=cand.external_id,
+            updated=False,
+            status=getattr(cand.status, "value", cand.status),
+            status_label=candidate_status_label(cand.status),
+            reason="status not eligible for idle profile extraction",
+        )
+
+    messages = db.query(Message).filter(Message.conversation_id == conv.id).order_by(Message.created_at.asc()).all()
+    if not messages:
+        return CandidateProfileExtractionOut(
+            conversation_id=conv.id,
+            candidate_id=cand.id,
+            external_id=cand.external_id,
+            updated=False,
+            status=getattr(cand.status, "value", cand.status),
+            status_label=candidate_status_label(cand.status),
+            reason="conversation has no messages",
+        )
+
+    try:
+        extracted = run_profile_extraction(cand, conv, messages)
+    except Exception as exc:
+        return CandidateProfileExtractionOut(
+            conversation_id=conv.id,
+            candidate_id=cand.id,
+            external_id=cand.external_id,
+            updated=False,
+            status=getattr(cand.status, "value", cand.status),
+            status_label=candidate_status_label(cand.status),
+            reason=str(exc),
+        )
+    if extracted["nickname"]:
+        cand.nickname = extracted["nickname"]
+    if extracted["city"]:
+        cand.city = extracted["city"]
+    if extracted["status"]:
+        cand.status = extracted["status"]
+
+    result_status = cand.status
+    event_payload = {
+        "nickname": extracted["nickname"],
+        "city": extracted["city"],
+        "status": getattr(result_status, "value", result_status),
+        "status_label": candidate_status_label(result_status),
+        "confidence": extracted["confidence"],
+        "reasoning": extracted["reasoning"],
+        "raw": extracted["raw"],
+        "model": extracted["model"],
+    }
+    db.add(Event(candidate_id=cand.id, conversation_id=conv.id, event_type=PROFILE_EXTRACTION_EVENT_TYPE, payload=event_payload))
+    db.commit()
+    return CandidateProfileExtractionOut(
+        conversation_id=conv.id,
+        candidate_id=cand.id,
+        external_id=cand.external_id,
+        nickname=cand.nickname,
+        city=cand.city,
+        updated=True,
+        status=getattr(result_status, "value", result_status),
+        status_label=candidate_status_label(result_status),
+        confidence=extracted["confidence"],
+        reason=extracted["reasoning"],
+    )
 
 
 @app.post('/events')
@@ -230,6 +530,7 @@ async def upload_photo(
     db.add(media)
     db.flush()
     db.add(Message(candidate_id=c.id, conversation_id=conv.id, sender="user", message_type="image", content=file.filename, media_asset_id=media.id))
+    conv.last_active_at = func.now()
     c.status = CandidateStatus.pending_review
     db.add(Event(candidate_id=c.id, conversation_id=conv.id, event_type="photo_received", payload={"media_asset_id": media.id}))
     db.commit()
@@ -250,14 +551,29 @@ def read_media(asset_id: int, token: str, db: Session = Depends(get_db)):
 def metrics_overview(db: Session = Depends(get_db), user=Depends(get_current_user)):
     today = date.today()
     new_candidates = db.query(func.count(Candidate.id)).filter(func.date(Candidate.created_at) == today).scalar() or 0
-    photo_candidates = (
+    photo_candidates_today = (
         db.query(func.count(func.distinct(MediaAsset.candidate_id))).filter(func.date(MediaAsset.created_at) == today).scalar() or 0
     )
-    conversion_rate = round((photo_candidates / new_candidates * 100), 2) if new_candidates else 0
+    # 发照转化率：历史口径 = 已发照人数 / 历史进入流程总人数；按候选人状态统计（未发送照片 vs 已发送照片）
+    total_candidates = db.query(func.count(Candidate.id)).scalar() or 0
+    status_photo_sent = (
+        CandidateStatus.pending_review,
+        CandidateStatus.reviewing,
+        CandidateStatus.passed,
+        CandidateStatus.rejected,
+        CandidateStatus.need_more_photo,
+    )
+    total_photo_candidates = (
+        db.query(func.count(Candidate.id)).filter(Candidate.status.in_(status_photo_sent)).scalar() or 0
+    )
+    photo_conversion_rate = (
+        round((total_photo_candidates / total_candidates * 100), 2) if total_candidates else 0
+    )
     return {
         "today_new_candidates": new_candidates,
-        "today_photo_candidates": photo_candidates,
-        "today_photo_conversion_rate": conversion_rate,
+        "today_photo_candidates": photo_candidates_today,
+        "today_photo_conversion_rate": round((photo_candidates_today / new_candidates * 100), 2) if new_candidates else 0,
+        "photo_conversion_rate": photo_conversion_rate,
     }
 
 
@@ -273,9 +589,11 @@ def metrics_funnel(db: Session = Depends(get_db), user=Depends(get_current_user)
 @app.get('/prompts/current')
 def get_current_prompt(db: Session = Depends(get_db)):
     p = db.query(Prompt).filter(Prompt.is_active == True).order_by(Prompt.created_at.desc()).first()
+    examples = db.query(PromptExample).filter(PromptExample.is_reviewed == True).order_by(PromptExample.id.asc()).all()
     if not p:
-        return {"version": "none", "content": ""}
-    return {"version": p.version, "content": p.content}
+        return {"version": "v1", "content": build_current_prompt_content("v1", "", examples)}
+    content = build_current_prompt_content(p.version, p.content, examples)
+    return {"version": p.version, "content": content}
 
 
 @app.get('/prompts')
@@ -300,6 +618,77 @@ def rollback_prompt(payload: PromptRollback, db: Session = Depends(get_db), user
     if not p:
         raise HTTPException(404, "Version not found")
     p.is_active = True
+    db.commit()
+    return {"ok": True}
+
+
+@app.get('/prompt-examples')
+def list_prompt_examples(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    rows = db.query(PromptExample).order_by(PromptExample.id.asc()).all()
+    return [
+        {
+            "id": e.id,
+            "context_summary": e.context_summary,
+            "correct_response": e.correct_response,
+            "source": e.source,
+            "is_reviewed": e.is_reviewed,
+            "created_by": e.created_by,
+            "created_at": e.created_at,
+        }
+        for e in rows
+    ]
+
+
+@app.post('/prompt-examples')
+def create_prompt_example(payload: PromptExampleCreate, db: Session = Depends(get_db), user=Depends(require_admin)):
+    e = PromptExample(
+        context_summary=payload.context_summary,
+        correct_response=payload.correct_response,
+        source=payload.source,
+        created_by=user.username,
+    )
+    db.add(e)
+    db.commit()
+    db.refresh(e)
+    return {"id": e.id, "ok": True}
+
+
+@app.put('/prompt-examples/{example_id}')
+def update_prompt_example(example_id: int, payload: PromptExampleUpdate, db: Session = Depends(get_db), user=Depends(require_admin)):
+    e = db.query(PromptExample).filter(PromptExample.id == example_id).first()
+    if not e:
+        raise HTTPException(404, "Not found")
+    if payload.context_summary is not None:
+        e.context_summary = payload.context_summary
+    if payload.correct_response is not None:
+        e.correct_response = payload.correct_response
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete('/prompt-examples/{example_id}')
+def delete_prompt_example(example_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    e = db.query(PromptExample).filter(PromptExample.id == example_id).first()
+    if not e:
+        raise HTTPException(404, "Not found")
+    db.delete(e)
+    db.commit()
+    return {"ok": True}
+
+
+@app.patch('/prompt-examples/{example_id}/review')
+def review_prompt_example(example_id: int, payload: PromptExampleReview, db: Session = Depends(get_db), user=Depends(require_admin)):
+    e = db.query(PromptExample).filter(PromptExample.id == example_id).first()
+    if not e:
+        raise HTTPException(404, "Not found")
+    e.is_reviewed = payload.is_reviewed
+    db.commit()
+    return {"ok": True}
+
+
+@app.patch('/prompt-examples/review-all')
+def review_all_prompt_examples(payload: PromptExampleReview, db: Session = Depends(get_db), user=Depends(require_admin)):
+    db.query(PromptExample).update({"is_reviewed": payload.is_reviewed})
     db.commit()
     return {"ok": True}
 

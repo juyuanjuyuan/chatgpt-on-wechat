@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh" class="">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Console Debug Test</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+    // Log everything for debugging
+    window.onerror = function(msg, url, lineNo, columnNo, error) {
+        var debugDiv = document.getElementById('debug-output') || document.body;
+        var errorMsg = 'JavaScript Error: ' + msg + '\nURL: ' + url + '\nLine: ' + lineNo + '\nColumn: ' + columnNo;
+        if (error && error.stack) {
+            errorMsg += '\nStack: ' + error.stack;
+        }
+        debugDiv.innerHTML += '<pre style="color:red;background:#fff;padding:10px;margin:10px;border:2px solid red;">' + errorMsg + '</pre>';
+        return false;
+    };
+    
+    // Apply theme before first paint
+    (function() {
+        var theme = localStorage.getItem('cow_theme') || 'dark';
+        if (theme === 'dark') document.documentElement.classList.add('dark');
+        console.log('Theme applied:', theme);
+    })();
+    </script>
+</head>
+<body class="h-screen overflow-hidden bg-gray-50 dark:bg-[#111111] text-slate-800 dark:text-slate-200">
+    <div id="debug-output" style="position:fixed; top:0; left:0; right:0; bottom:0; overflow:auto; z-index:9999; background:white; padding:20px;">
+        <h1 style="color:#000;">Console Debug Test</h1>
+        <p id="status" style="color:#000;">Initializing...</p>
+        <div id="test-results" style="color:#000;"></div>
+    </div>
+    
+    <script>
+        var results = [];
+        var testResults = document.getElementById('test-results');
+        var status = document.getElementById('status');
+        
+        function log(msg, isError) {
+            results.push(msg);
+            var color = isError ? 'red' : 'green';
+            testResults.innerHTML += '<div style="color:' + color + '; margin:5px 0;">' + msg + '</div>';
+            console.log(msg);
+        }
+        
+        try {
+            // Test 1: Check if Tailwind is loaded
+            log('Test 1: Checking Tailwind CSS...');
+            var testDiv = document.createElement('div');
+            testDiv.className = 'bg-red-500';
+            document.body.appendChild(testDiv);
+            var computed = window.getComputedStyle(testDiv);
+            var bgColor = computed.backgroundColor;
+            document.body.removeChild(testDiv);
+            
+            if (bgColor && bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent') {
+                log('✓ Tailwind CSS is loaded! Background color: ' + bgColor);
+            } else {
+                log('✗ Tailwind CSS NOT loaded or not working!', true);
+            }
+            
+            // Test 2: Check dark mode
+            log('Test 2: Checking dark mode...');
+            var htmlClass = document.documentElement.className;
+            log('HTML classes: ' + htmlClass);
+            var bodyStyle = window.getComputedStyle(document.body);
+            log('Body background: ' + bodyStyle.backgroundColor);
+            
+            // Test 3: Check localStorage
+            log('Test 3: Checking localStorage...');
+            var theme = localStorage.getItem('cow_theme');
+            log('Stored theme: ' + (theme || 'not set'));
+            
+            // Test 4: Simulate console.js element queries
+            log('Test 4: Simulating console.js initialization...');
+            var chatInput = document.getElementById('chat-input');
+            var sendBtn = document.getElementById('send-btn');
+            var messagesDiv = document.getElementById('chat-messages');
+            
+            log('chat-input: ' + (chatInput ? 'FOUND' : 'NOT FOUND (THIS WILL CRASH!)'), !chatInput);
+            log('send-btn: ' + (sendBtn ? 'FOUND' : 'NOT FOUND (THIS WILL CRASH!)'), !sendBtn);
+            log('chat-messages: ' + (messagesDiv ? 'FOUND' : 'NOT FOUND (THIS WILL CRASH!)'), !messagesDiv);
+            
+            status.textContent = 'Tests completed! Check results above.';
+            status.style.color = '#000';
+            
+        } catch(e) {
+            log('✗ FATAL ERROR: ' + e.message, true);
+            log('Stack: ' + e.stack, true);
+            status.textContent = 'FATAL ERROR: ' + e.message;
+            status.style.color = 'red';
+        }
+    </script>
+</body>
+</html>

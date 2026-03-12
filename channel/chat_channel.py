@@ -186,13 +186,16 @@ class ChatChannel(Channel):
         if cmsg:
             external_id = getattr(cmsg, "other_user_id", None)
             runtime_client.upsert_candidate(external_id=external_id, nickname=getattr(cmsg, "from_user_nickname", None))
+            msg_type = str(context.type).split(".")[-1].lower()
+            _non_text_labels = {ContextType.IMAGE: "[图片]", ContextType.VOICE: "[语音]", ContextType.VIDEO: "[视频]", ContextType.FILE: "[文件]"}
+            msg_content = _non_text_labels.get(context.type, str(context.content))
             runtime_client.log_message(
                 external_id=external_id,
                 session_key=session_key,
                 channel=channel_type,
                 sender="user",
-                message_type=str(context.type).split(".")[-1].lower(),
-                content=str(context.content),
+                message_type=msg_type,
+                content=msg_content,
             )
             if context.type == ContextType.TEXT and is_underage(str(context.content)):
                 runtime_client.add_event(external_id, session_key, "underage_stop")

@@ -10,7 +10,7 @@ from common.log import logger
 
 class MCPRuntimeClient:
     def __init__(self):
-        self.base_url = os.getenv("MCP_BASE_URL", "http://mcp-api-server:8001")
+        self.base_url = os.getenv("MCP_BASE_URL", "http://127.0.0.1:8001")
         self.prompt_cache_ttl = int(os.getenv("PROMPT_CACHE_SECONDS", "30"))
         self._prompt_cache = {"at": 0, "content": ""}
 
@@ -19,6 +19,15 @@ class MCPRuntimeClient:
             requests.post(f"{self.base_url}{path}", json=payload, timeout=5)
         except Exception as e:
             logger.warning(f"[CowAgent] MCP post failed {path}: {e}")
+
+    def _get_json(self, path: str, params: Optional[dict] = None, timeout: int = 10):
+        try:
+            resp = requests.get(f"{self.base_url}{path}", params=params or {}, timeout=timeout)
+            if resp.ok:
+                return resp.json()
+        except Exception as e:
+            logger.warning(f"[CowAgent] MCP get failed {path}: {e}")
+        return None
 
     def log_message(self, external_id: str, session_key: str, channel: str, sender: str, message_type: str, content: str):
         self._post(
@@ -69,6 +78,45 @@ class MCPRuntimeClient:
         except Exception as e:
             logger.warning(f"[CowAgent] fetch prompt failed: {e}")
         return ""
+
+    def get_conversation_history(self, session_key: str, limit: int = 40) -> list:
+        """Fetch recent messages for a session from MCP API.
+        Returns list of {"sender": "user"|"assistant", "content": "..."}
+        """
+        try:
+            resp = requests.get(
+                f"{self.base_url}/conversations/history",
+                params={"session_key": session_key, "limit": limit},
+                timeout=5,
+            )
+            if resp.ok:
+                return resp.json().get("messages") or []
+        except Exception as e:
+            logger.warning(f"[CowAgent] fetch conversation history failed: {e}")
+        return []
+
+    def get_pending_followups(self, min_idle_hours: float = 2, max_followups: int = 3, limit: int = 50) -> list:
+        return self._get_json(
+            "/conversations/pending-followup",
+            params={"min_idle_hours": min_idle_hours, "max_followups": max_followups, "limit": limit},
+            timeout=10,
+        ) or []
+
+    def get_pending_profile_extractions(self, idle_minutes: int = 20, limit: int = 50) -> list:
+        return self._get_json(
+            "/conversations/pending-profile-extraction",
+            params={"idle_minutes": idle_minutes, "limit": limit},
+            timeout=10,
+        ) or []
+
+    def extract_candidate_profile(self, conversation_id: int) -> dict:
+        try:
+            resp = requests.post(f"{self.base_url}/conversations/{conversation_id}/extract-profile", timeout=45)
+            if resp.ok:
+                return resp.json()
+        except Exception as e:
+            logger.warning(f"[CowAgent] candidate profile extraction failed: {e}")
+        return {}
 
 
 def is_underage(content: str) -> bool:

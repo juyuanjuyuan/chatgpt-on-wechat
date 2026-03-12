@@ -13,6 +13,6 @@ export default function Overview(){
   return <div><Nav/><h1>概览</h1>{m? <div>
     <p>今日新增：{m.today_new_candidates}</p>
     <p>今日发照人数：{m.today_photo_candidates}</p>
-    <p>今日发照转化率：{m.today_photo_conversion_rate}%</p>
+    <p>发照转化率（历史）：{m.photo_conversion_rate ?? m.today_photo_conversion_rate}%</p>
   </div>:'loading...'}</div>
 }

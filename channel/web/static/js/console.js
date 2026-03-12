@@ -16,8 +16,14 @@ const I18N = {
         nav_chat: '对话', nav_manage: '管理', nav_monitor: '监控',
         menu_chat: '对话', menu_config: '配置', menu_skills: '技能',
         menu_memory: '记忆', menu_channels: '通道', menu_tasks: '定时',
-        menu_logs: '日志', menu_recruit: '招募看板',
-        recruit_title: '招募看板', recruit_desc: '候选人概览、状态管理与 Prompt 版本管理',
+        menu_logs: '日志', menu_recruit: '招募看板', menu_training: '训练语料',
+        recruit_title: '招募看板', recruit_desc: '候选人概览与状态管理',
+        training_title: '训练语料', training_desc: '管理训练语料，优化 AI 回复质量',
+        training_add_title: '添加训练语料',
+        training_context_label: '上下文摘要（不该回答的内容）', training_context_hint: '例：我们是卖东西的？',
+        training_response_label: '确定回复（应该怎么回答）', training_response_hint: '例：我们这边主要是轻聊聊天主播...',
+        training_col_context: '上下文摘要', training_col_response: '确定回复',
+        training_col_source: '来源', training_col_reviewed: '审核', training_col_actions: '操作',
         welcome_subtitle: '我可以帮你解答问题、管理计算机、创造和执行技能，并通过长期记忆<br>不断成长',
         example_sys_title: '系统管理', example_sys_text: '帮我查看工作空间里有哪些文件',
         example_task_title: '智能任务', example_task_text: '提醒我5分钟后查看服务器情况',
@@ -63,8 +69,14 @@ const I18N = {
         nav_chat: 'Chat', nav_manage: 'Management', nav_monitor: 'Monitor',
         menu_chat: 'Chat', menu_config: 'Config', menu_skills: 'Skills',
         menu_memory: 'Memory', menu_channels: 'Channels', menu_tasks: 'Tasks',
-        menu_logs: 'Logs', menu_recruit: 'Recruit Dashboard',
-        recruit_title: 'Recruit Dashboard', recruit_desc: 'Candidates overview, status operations, and prompt versioning',
+        menu_logs: 'Logs', menu_recruit: 'Recruit Dashboard', menu_training: 'Training Data',
+        recruit_title: 'Recruit Dashboard', recruit_desc: 'Candidates overview and status operations',
+        training_title: 'Training Data', training_desc: 'Manage training data to optimize AI responses',
+        training_add_title: 'Add Training Data',
+        training_context_label: 'Context Summary (what should not be answered)', training_context_hint: 'e.g. Are we selling stuff?',
+        training_response_label: 'Correct Response (how to answer)', training_response_hint: 'e.g. We mainly do live chat hosting...',
+        training_col_context: 'Context Summary', training_col_response: 'Correct Response',
+        training_col_source: 'Source', training_col_reviewed: 'Reviewed', training_col_actions: 'Actions',
         welcome_subtitle: 'I can help you answer questions, manage your computer, create and execute skills, and keep growing through <br> long-term memory.',
         example_sys_title: 'System', example_sys_text: 'Show me the files in the workspace',
         example_task_title: 'Smart Task', example_task_text: 'Remind me to check the server in 5 minutes',
@@ -170,6 +182,7 @@ const VIEW_META = {
     tasks:    { group: 'nav_manage',  page: 'menu_tasks' },
     logs:     { group: 'nav_monitor', page: 'menu_logs' },
     recruit:  { group: 'nav_manage',  page: 'menu_recruit' },
+    training: { group: 'nav_manage',  page: 'menu_training' },
 };
 
 let currentView = 'chat';
@@ -1837,40 +1850,194 @@ function stopLogStream() {
 // Recruit Dashboard
 // =====================================================================
 let recruitCurrentCandidateId = null;
+let recruitLastRefreshAt = 0;
+const RECRUIT_STATUS_META = {
+    pending_photo: {
+        label: '未发送照片',
+        badge: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:border-amber-500/20'
+    },
+    pending_review: {
+        label: '已发送照片',
+        badge: 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-200 dark:border-sky-500/20'
+    },
+    reviewing: {
+        label: '审核中',
+        badge: 'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-500/10 dark:text-violet-200 dark:border-violet-500/20'
+    },
+    passed: {
+        label: '已通过',
+        badge: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-200 dark:border-emerald-500/20'
+    },
+    rejected: {
+        label: '已拒绝',
+        badge: 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/10 dark:text-rose-200 dark:border-rose-500/20'
+    },
+    blacklisted: {
+        label: '黑名单',
+        badge: 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-500/10 dark:text-slate-200 dark:border-slate-500/20'
+    },
+    underage_terminated: {
+        label: '未成年终止',
+        badge: 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-500/10 dark:text-orange-200 dark:border-orange-500/20'
+    },
+    need_more_photo: {
+        label: '需补照片',
+        badge: 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200 dark:bg-fuchsia-500/10 dark:text-fuchsia-200 dark:border-fuchsia-500/20'
+    },
+};
 
 function recruitApi(path, options = {}) {
     return fetch('/api/recruit' + path, options).then(r => r.json());
 }
 
+function getRecruitStatusMeta(status) {
+    return RECRUIT_STATUS_META[status] || {
+        label: status || '未知状态',
+        badge: 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-500/10 dark:text-slate-300 dark:border-slate-500/20'
+    };
+}
+
+function renderRecruitStatusBadge(status) {
+    const meta = getRecruitStatusMeta(status);
+    return `<span class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${meta.badge}">${escapeHtml(meta.label)}</span>`;
+}
+
+function formatRecruitRelativeTime(value) {
+    if (!value) return '最近活跃: 暂无';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '最近活跃: 暂无';
+    const diffMs = Date.now() - date.getTime();
+    const diffMinutes = Math.max(0, Math.round(diffMs / 60000));
+    if (diffMinutes < 1) return '最近活跃: 刚刚';
+    if (diffMinutes < 60) return `最近活跃: ${diffMinutes} 分钟前`;
+    const diffHours = Math.round(diffMinutes / 60);
+    if (diffHours < 24) return `最近活跃: ${diffHours} 小时前`;
+    const diffDays = Math.round(diffHours / 24);
+    return `最近活跃: ${diffDays} 天前`;
+}
+
+function formatRecruitRefreshText() {
+    if (!recruitLastRefreshAt) return '点击“立即刷新”获取最新数据';
+    return `手动刷新 · ${formatRecruitRelativeTime(recruitLastRefreshAt).replace('最近活跃: ', '')}更新`;
+}
+
+function updateRecruitRefreshIndicator() {
+    const el = document.getElementById('recruit-auto-refresh');
+    if (!el) return;
+    el.textContent = formatRecruitRefreshText();
+}
+
+function setRecruitFocusSummary(text) {
+    const el = document.getElementById('recruit-focus-summary');
+    if (el) el.textContent = text;
+}
+
+function setRecruitListError(message = '') {
+    const el = document.getElementById('recruit-list-error');
+    if (!el) return;
+    if (message) {
+        el.textContent = message;
+        el.classList.remove('hidden');
+    } else {
+        el.textContent = '';
+        el.classList.add('hidden');
+    }
+}
+
+function setRecruitListSummary(text) {
+    const el = document.getElementById('recruit-list-summary');
+    if (el) el.textContent = text;
+}
+
+function setRecruitDetailPlaceholder(message) {
+    const emptyEl = document.getElementById('recruit-detail-empty');
+    const detailEl = document.getElementById('recruit-detail');
+    if (emptyEl) {
+        emptyEl.innerHTML = `<div class="mx-auto max-w-sm rounded-2xl border border-dashed border-slate-300 px-6 py-8 text-sm text-slate-500 dark:border-white/10 dark:text-slate-400">${escapeHtml(message)}</div>`;
+        emptyEl.classList.remove('hidden');
+    }
+    if (detailEl) detailEl.classList.add('hidden');
+}
+
 function renderRecruitCandidates(items) {
     const tbody = document.getElementById('recruit-candidates-tbody');
-    tbody.innerHTML = (items || []).map(i => `
-      <tr class="border-b border-slate-200 dark:border-white/10">
-        <td class="py-2">${i.id}</td><td>${escapeHtml(i.nickname || '')}</td><td>${escapeHtml(i.city || '')}</td><td>${escapeHtml(i.status || '')}</td>
-        <td><button class="text-blue-500" onclick="loadRecruitCandidateDetail(${i.id})">查看</button></td>
-      </tr>`).join('');
+    if (!tbody) return;
+    if (!items || !items.length) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="5" class="px-5 py-10 text-center text-sm text-slate-500 dark:text-slate-400">
+              暂无候选人数据，等待新会话写入。
+            </td>
+          </tr>`;
+        return;
+    }
+    tbody.innerHTML = items.map(i => {
+        const selected = recruitCurrentCandidateId === i.id;
+        return `
+          <tr data-candidate-id="${i.id}" class="border-b border-slate-200 transition-colors hover:bg-slate-50/80 dark:border-white/10 dark:hover:bg-white/[0.03] ${selected ? 'bg-sky-50/70 dark:bg-sky-500/10' : ''}">
+            <td class="px-5 py-4 text-sm font-medium text-slate-900 dark:text-white">#${i.id}</td>
+            <td class="px-5 py-4">
+              <div class="min-w-0">
+                <div class="truncate font-medium text-slate-900 dark:text-white">${escapeHtml(i.nickname || '待提取昵称')}</div>
+                <div class="mt-1 text-xs text-slate-400">${escapeHtml(i.external_id || '')}</div>
+              </div>
+            </td>
+            <td class="px-5 py-4 text-sm text-slate-600 dark:text-slate-300">${escapeHtml(i.city || '待提取城市')}</td>
+            <td class="px-5 py-4">${renderRecruitStatusBadge(i.status)}</td>
+            <td class="px-5 py-4 text-right">
+              <button data-view-btn="${i.id}" class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 dark:border-white/10 dark:text-slate-200 dark:hover:bg-white/[0.06]" onclick="loadRecruitCandidateDetail(${i.id})">
+                ${selected ? '查看中' : '查看'}
+              </button>
+            </td>
+          </tr>`;
+    }).join('');
+    syncRecruitSelectedRow();
+}
+
+function syncRecruitSelectedRow() {
+    document.querySelectorAll('#recruit-candidates-tbody tr[data-candidate-id]').forEach(row => {
+        const candidateId = Number(row.dataset.candidateId);
+        const selected = candidateId === recruitCurrentCandidateId;
+        row.classList.toggle('bg-sky-50/70', selected);
+        row.classList.toggle('dark:bg-sky-500/10', selected);
+        const btn = row.querySelector('button[data-view-btn]');
+        if (btn) btn.textContent = selected ? '查看中' : '查看';
+    });
 }
 
 function loadRecruitOverview() {
-    recruitApi('/overview').then(data => {
-        if (data.status !== 'success') return;
+    return recruitApi('/overview').then(data => {
+        if (data.status !== 'success') throw new Error(data.message || '概览加载失败');
         const o = data.overview || {};
         document.getElementById('recruit-kpi-new').textContent = o.today_new_candidates ?? '-';
         document.getElementById('recruit-kpi-photo').textContent = o.today_photo_candidates ?? '-';
-        document.getElementById('recruit-kpi-rate').textContent = `${o.today_photo_conversion_rate ?? '-'}%`;
+        document.getElementById('recruit-kpi-rate').textContent = `${o.photo_conversion_rate ?? o.today_photo_conversion_rate ?? '-'}%`;
+    }).catch(err => {
+        setRecruitListError(err.message || '概览加载失败');
     });
 }
 
 function loadRecruitCandidates() {
-    recruitApi('/candidates?limit=50&offset=0').then(data => {
-        if (data.status !== 'success') return;
-        renderRecruitCandidates(data.items || []);
+    setRecruitListSummary('正在同步候选人列表...');
+    return recruitApi('/candidates?limit=50&offset=0').then(data => {
+        if (data.status !== 'success') throw new Error(data.message || '候选人列表加载失败');
+        const items = data.items || [];
+        renderRecruitCandidates(items);
+        setRecruitListError('');
+        setRecruitListSummary(items.length ? `当前展示 ${items.length} / ${data.total || items.length} 位候选人` : '当前暂无候选人');
+        recruitLastRefreshAt = Date.now();
+        updateRecruitRefreshIndicator();
+    }).catch(err => {
+        renderRecruitCandidates([]);
+        setRecruitListSummary('列表加载失败');
+        setRecruitListError(err.message || '候选人列表加载失败');
     });
 }
 
 function loadRecruitPrompts() {
     recruitApi('/prompts').then(data => {
         const el = document.getElementById('recruit-prompts');
+        if (!el) return;
         if (data.status !== 'success') { el.innerHTML = '<li>加载失败</li>'; return; }
         el.innerHTML = (data.items || []).map(p => `<li>${escapeHtml(p.version)} ${p.is_active ? '(生效中)' : ''} <button class="text-amber-500" onclick="rollbackRecruitPrompt('${p.version}')">回滚</button></li>`).join('');
     });
@@ -1878,15 +2045,118 @@ function loadRecruitPrompts() {
 
 function loadRecruitCandidateDetail(id) {
     recruitCurrentCandidateId = id;
-    recruitApi(`/candidates/${id}`).then(data => {
-        if (data.status !== 'success') return;
+    setRecruitFocusSummary(`正在加载候选人 #${id}`);
+    setRecruitDetailPlaceholder(`正在加载候选人 #${id} 的资料与会话记录...`);
+    return recruitApi(`/candidates/${id}`).then(data => {
+        if (data.status !== 'success') throw new Error(data.message || '详情加载失败');
         document.getElementById('recruit-detail-empty').classList.add('hidden');
         document.getElementById('recruit-detail').classList.remove('hidden');
         const c = data.candidate || {};
-        document.getElementById('recruit-detail-base').textContent = `#${c.id} ${c.nickname || ''} ${c.city || ''}`;
-        document.getElementById('recruit-status-select').value = c.status || 'pending_photo';
-        document.getElementById('recruit-messages').innerHTML = (data.messages || []).map(m => `<li>[${escapeHtml(m.sender || '')}] ${escapeHtml(m.message_type || '')}: ${escapeHtml(m.content || '')}</li>`).join('');
-        document.getElementById('recruit-photos').innerHTML = (data.photos || []).map(p => `<li><a class="text-blue-500" href="${p.preview_url}" target="_blank">${escapeHtml(p.filename || '')}</a></li>`).join('');
+        const title = c.nickname || `候选人 #${c.id || id}`;
+        document.getElementById('recruit-detail-base').textContent = title;
+        document.getElementById('recruit-detail-meta').textContent = [c.external_id, c.city || '城市待提取'].filter(Boolean).join(' · ');
+        document.getElementById('recruit-detail-last-active').textContent = formatRecruitRelativeTime(c.last_active_at);
+        document.getElementById('recruit-detail-status-badge').innerHTML = renderRecruitStatusBadge(c.status);
+        // 仅两态：未发送照片 / 已发送照片；其他状态在下拉中映射为已发送照片
+        const statusForSelect = (c.status === 'pending_photo') ? 'pending_photo' : 'pending_review';
+        document.getElementById('recruit-status-select').value = statusForSelect;
+        setRecruitFocusSummary(`${title} · ${getRecruitStatusMeta(c.status).label}`);
+        syncRecruitSelectedRow();
+
+        const messagesEl = document.getElementById('recruit-messages');
+        const messages = data.messages || [];
+        if (!messages.length) {
+            messagesEl.innerHTML = '<p class="text-sm text-slate-400 text-center py-4">' +
+                (currentLang === 'zh' ? '\u6682\u65e0\u6d88\u606f' : 'No messages') + '</p>';
+        } else {
+            messagesEl.innerHTML = messages.map(m => {
+                const senderLower = (m.sender || '').toLowerCase();
+                const isCandidate = senderLower !== 'bot' && senderLower !== 'ai' && senderLower !== 'assistant';
+                const isImage = m.message_type === 'image' && m.media_asset_id;
+                let contentHtml;
+                if (isImage) {
+                    const imgUrl = '/api/recruit/media/' + m.media_asset_id;
+                    contentHtml = `<a href="${imgUrl}" target="_blank"><img src="${imgUrl}" alt="photo" class="max-w-[200px] max-h-[200px] rounded-lg" onerror="this.outerHTML='<span class=\\'text-sm text-slate-400\\'>[图片加载失败]</span>'"></a>`;
+                } else {
+                    contentHtml = escapeHtml(m.content || '');
+                }
+                const safeContent = escapeHtml(m.content || '').replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+                if (isCandidate) {
+                    return `<div class="flex items-start gap-2 max-w-[85%]">
+                        <div class="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <i class="fas fa-user text-blue-500 text-xs"></i>
+                        </div>
+                        <div class="min-w-0">
+                            <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-2xl rounded-tl-md px-3.5 py-2 text-sm text-slate-700 dark:text-slate-200 break-words shadow-sm shadow-blue-900/5">${contentHtml}</div>
+                            <div class="flex items-center gap-2 mt-1">
+                                <span class="text-[10px] text-slate-400">${escapeHtml(m.sender || '')}</span>
+                                <button onclick="addToTrainingData('${safeContent}')"
+                                    class="text-[10px] text-primary-500 hover:text-primary-600 hover:underline cursor-pointer transition-colors"
+                                    title="${currentLang === 'zh' ? '\u6dfb\u52a0\u81f3\u8bad\u7ec3\u8bed\u6599' : 'Add to training data'}">
+                                    <i class="fas fa-plus-circle mr-0.5"></i>${currentLang === 'zh' ? '\u6dfb\u52a0\u81f3\u8bed\u6599' : 'Add to training'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>`;
+                } else {
+                    return `<div class="flex items-start gap-2 max-w-[85%] ml-auto flex-row-reverse">
+                        <div class="w-7 h-7 rounded-full bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <i class="fas fa-robot text-primary-500 text-xs"></i>
+                        </div>
+                        <div class="min-w-0">
+                            <div class="bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800/40 rounded-2xl rounded-tr-md px-3.5 py-2 text-sm text-slate-700 dark:text-slate-200 break-words shadow-sm shadow-primary-900/5">${contentHtml}</div>
+                            <div class="flex items-center gap-2 mt-1 justify-end">
+                                <button onclick="addToTrainingData('${safeContent}')"
+                                    class="text-[10px] text-primary-500 hover:text-primary-600 hover:underline cursor-pointer transition-colors"
+                                    title="${currentLang === 'zh' ? '\u6dfb\u52a0\u81f3\u8bad\u7ec3\u8bed\u6599' : 'Add to training data'}">
+                                    <i class="fas fa-plus-circle mr-0.5"></i>${currentLang === 'zh' ? '\u6dfb\u52a0\u81f3\u8bed\u6599' : 'Add to training'}
+                                </button>
+                                <span class="text-[10px] text-slate-400">AI</span>
+                            </div>
+                        </div>
+                    </div>`;
+                }
+            }).join('');
+        }
+
+        // Scroll to bottom of messages
+        requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
+
+        // Photos
+        const photos = data.photos || [];
+        const photosWrap = document.getElementById('recruit-photos-wrap');
+        const photosEl = document.getElementById('recruit-photos');
+        if (photos.length) {
+            photosWrap.classList.remove('hidden');
+            photosEl.innerHTML = photos.map(p => {
+                const proxyUrl = '/api/recruit/media/' + p.id;
+                return `<a href="${proxyUrl}" target="_blank" class="inline-block rounded-2xl border border-slate-200 dark:border-white/10 overflow-hidden hover:opacity-80 transition-all hover:-translate-y-0.5">
+                    <img src="${proxyUrl}" alt="${escapeHtml(p.filename || '')}" class="w-24 h-24 object-cover" onerror="this.parentElement.innerHTML='<span class=\\'px-3 py-2 text-xs text-slate-500\\'>${escapeHtml(p.filename || '')}</span>'">
+                </a>`;
+            }).join('');
+        } else {
+            photosWrap.classList.add('hidden');
+        }
+        recruitLastRefreshAt = Date.now();
+        updateRecruitRefreshIndicator();
+    }).catch(err => {
+        setRecruitDetailPlaceholder(err.message || `候选人 #${id} 详情加载失败`);
+        document.getElementById('recruit-detail-status-badge').innerHTML = '';
+        setRecruitFocusSummary(`候选人 #${id} 加载失败`);
+    });
+}
+
+function addToTrainingData(content) {
+    navigateTo('training');
+    requestAnimationFrame(() => {
+        const ctx = document.getElementById('pe-add-context');
+        if (ctx) {
+            ctx.value = content.replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+                              .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+            ctx.focus();
+            ctx.style.height = 'auto';
+            ctx.style.height = ctx.scrollHeight + 'px';
+        }
     });
 }
 
@@ -1897,9 +2167,12 @@ function saveRecruitCandidateStatus() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status })
-    }).then(() => {
+    }).then(data => {
+        if (data.status !== 'success') throw new Error(data.message || '状态保存失败');
         loadRecruitCandidates();
         loadRecruitCandidateDetail(recruitCurrentCandidateId);
+    }).catch(err => {
+        setRecruitListError(err.message || '状态保存失败');
     });
 }
 
@@ -1922,15 +2195,91 @@ function rollbackRecruitPrompt(version) {
     }).then(loadRecruitPrompts);
 }
 
+// -- Prompt Examples (训练语料) --
+
+let _promptExamplesCache = [];
+
+function loadPromptExamples() {
+    recruitApi('/prompt-examples').then(data => {
+        const tbody = document.getElementById('pe-tbody');
+        const emptyEl = document.getElementById('pe-empty');
+        if (data.status !== 'success') { tbody.innerHTML = ''; emptyEl.classList.remove('hidden'); return; }
+        const items = data.items || [];
+        _promptExamplesCache = items;
+        if (!items.length) { tbody.innerHTML = ''; emptyEl.classList.remove('hidden'); updatePEStats(items); return; }
+        emptyEl.classList.add('hidden');
+        tbody.innerHTML = items.map((e, idx) => `
+          <tr class="border-b border-slate-200 dark:border-white/10 align-top">
+            <td class="py-2 text-xs text-slate-400">${idx + 1}</td>
+            <td class="py-2 text-sm max-w-[260px]"><div class="line-clamp-3">${escapeHtml(e.context_summary)}</div></td>
+            <td class="py-2 text-sm max-w-[320px]"><div class="line-clamp-3">${escapeHtml(e.correct_response)}</div></td>
+            <td class="py-2 text-xs text-slate-400">${escapeHtml(e.source || 'manual')}</td>
+            <td class="py-2 text-center"><input type="checkbox" ${e.is_reviewed ? 'checked' : ''} onchange="toggleReviewPE(${e.id}, this.checked)" class="accent-emerald-600 w-4 h-4 cursor-pointer" /></td>
+            <td class="py-2 text-center"><button class="text-red-500 hover:text-red-700 text-xs" onclick="deletePE(${e.id})">删除</button></td>
+          </tr>`).join('');
+        updatePEStats(items);
+    });
+}
+
+function updatePEStats(items) {
+    const reviewed = items.filter(e => e.is_reviewed).length;
+    const el = document.getElementById('pe-review-stats');
+    if (el) el.textContent = items.length ? `已审核: ${reviewed}/${items.length}${reviewed === items.length ? ' 全部审核通过' : ''}` : '';
+}
+
+function addPromptExample() {
+    const ctx = document.getElementById('pe-add-context').value.trim();
+    const resp = document.getElementById('pe-add-response').value.trim();
+    if (!ctx || !resp) return;
+    recruitApi('/prompt-examples', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context_summary: ctx, correct_response: resp, source: 'manual' })
+    }).then(data => {
+        if (data.status === 'success') {
+            document.getElementById('pe-add-context').value = '';
+            document.getElementById('pe-add-response').value = '';
+            loadPromptExamples();
+        }
+    });
+}
+
+function deletePE(id) {
+    if (!confirm('确定删除该语料？')) return;
+    recruitApi(`/prompt-examples/${id}`, { method: 'DELETE' }).then(() => loadPromptExamples());
+}
+
+function toggleReviewPE(id, reviewed) {
+    recruitApi(`/prompt-examples/${id}/review`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_reviewed: reviewed })
+    }).then(() => loadPromptExamples());
+}
+
+function reviewAllPE(reviewed) {
+    recruitApi('/prompt-examples/review-all', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_reviewed: reviewed })
+    }).then(() => loadPromptExamples());
+}
+
 function loadRecruitView() {
     loadRecruitOverview();
     loadRecruitCandidates();
-    loadRecruitPrompts();
+    if (recruitCurrentCandidateId) {
+        loadRecruitCandidateDetail(recruitCurrentCandidateId);
+    } else {
+        setRecruitDetailPlaceholder('选择左侧候选人后，这里会展示资料摘要、会话记录和照片。');
+    }
+    updateRecruitRefreshIndicator();
     const refreshBtn = document.getElementById('recruit-refresh-btn');
     if (refreshBtn && !refreshBtn.dataset.bound) {
         refreshBtn.addEventListener('click', () => {
             loadRecruitOverview();
             loadRecruitCandidates();
+            if (recruitCurrentCandidateId) loadRecruitCandidateDetail(recruitCurrentCandidateId);
         });
         refreshBtn.dataset.bound = '1';
     }
@@ -1939,10 +2288,28 @@ function loadRecruitView() {
         saveBtn.addEventListener('click', saveRecruitCandidateStatus);
         saveBtn.dataset.bound = '1';
     }
-    const publishBtn = document.getElementById('recruit-publish-btn');
-    if (publishBtn && !publishBtn.dataset.bound) {
-        publishBtn.addEventListener('click', publishRecruitPrompt);
-        publishBtn.dataset.bound = '1';
+    updateRecruitRefreshIndicator();
+}
+
+// =====================================================================
+// Training Data View (训练语料)
+// =====================================================================
+function loadTrainingView() {
+    loadPromptExamples();
+    const peAddBtn = document.getElementById('pe-add-btn');
+    if (peAddBtn && !peAddBtn.dataset.bound) {
+        peAddBtn.addEventListener('click', addPromptExample);
+        peAddBtn.dataset.bound = '1';
+    }
+    const peReviewAllBtn = document.getElementById('pe-review-all-btn');
+    if (peReviewAllBtn && !peReviewAllBtn.dataset.bound) {
+        peReviewAllBtn.addEventListener('click', () => reviewAllPE(true));
+        peReviewAllBtn.dataset.bound = '1';
+    }
+    const peUnreviewAllBtn = document.getElementById('pe-unreview-all-btn');
+    if (peUnreviewAllBtn && !peUnreviewAllBtn.dataset.bound) {
+        peUnreviewAllBtn.addEventListener('click', () => reviewAllPE(false));
+        peUnreviewAllBtn.dataset.bound = '1';
     }
 }
 
@@ -1969,6 +2336,7 @@ navigateTo = function(viewId) {
     else if (viewId === 'tasks') loadTasksView();
     else if (viewId === 'logs') startLogStream();
     else if (viewId === 'recruit') loadRecruitView();
+    else if (viewId === 'training') loadTrainingView();
 };
 
 // =====================================================================

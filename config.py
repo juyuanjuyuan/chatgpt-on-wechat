@@ -57,8 +57,9 @@ available_setting = {
     # chatgpt会话参数
     "expires_in_seconds": 3600,  # 无操作会话的过期时间
     # 人格描述
-    "character_desc": "你是ChatGPT, 一个由OpenAI训练的大型语言模型, 你旨在回答并解决人们的任何问题，并且可以使用多种语言与人交流。",
-    "conversation_max_tokens": 1000,  # 支持上下文记忆的最多字符数
+    "character_desc": "",
+    "recruiter_prompt_fallback": "prompts/recruiter_v1.md",  # MCP 不可用时本地招募 prompt，保证企微仍用北北人设
+    "conversation_max_tokens": 40000,  # 支持上下文记忆的最多 token 数；招募场景 prompt 长、需保留多轮对话
     # chatgpt限流配置
     "rate_limit_chatgpt": 20,  # chatgpt的调用频率限制
     "rate_limit_dalle": 50,  # openai dalle的调用频率限制

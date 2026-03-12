@@ -19,7 +19,7 @@ from collections import OrderedDict
 from common import const
 from common.log import logger
 from common.singleton import singleton
-from config import conf
+from config import conf, get_root
 
 
 class WebMessage(ChatMessage):
@@ -300,10 +300,12 @@ class WebChannel(ChatChannel):
 
         urls = (
             '/', 'RootHandler',
+            '/WW_verify_fw4kBfmxdeLF0r3z.txt', 'WechatVerifyHandler',
             '/message', 'MessageHandler',
             '/poll', 'PollHandler',
             '/stream', 'StreamHandler',
             '/chat', 'ChatHandler',
+            '/debug', 'DebugHandler',
             '/config', 'ConfigHandler',
             '/api/channels', 'ChannelsHandler',
             '/api/tools', 'ToolsHandler',
@@ -319,6 +321,11 @@ class WebChannel(ChatChannel):
             '/api/recruit/prompts', 'RecruitPromptsHandler',
             '/api/recruit/prompts/publish', 'RecruitPromptPublishHandler',
             '/api/recruit/prompts/rollback', 'RecruitPromptRollbackHandler',
+            '/api/recruit/prompt-examples', 'RecruitPromptExamplesHandler',
+            '/api/recruit/prompt-examples/review-all', 'RecruitPromptExamplesReviewAllHandler',
+            '/api/recruit/prompt-examples/(\d+)', 'RecruitPromptExampleDetailHandler',
+            '/api/recruit/prompt-examples/(\d+)/review', 'RecruitPromptExampleReviewHandler',
+            '/api/recruit/media/(\d+)', 'RecruitMediaProxyHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
@@ -358,6 +365,35 @@ class RootHandler:
         raise web.seeother('/chat')
 
 
+class WechatVerifyHandler:
+    """企微域名校验：GET /WW_verify_fw4kBfmxdeLF0r3z.txt 返回验证文件内容，供 kf.welikefun.cn 校验。"""
+
+    _VERIFY_FILENAME = 'WW_verify_fw4kBfmxdeLF0r3z.txt'
+    # 与项目根目录 WW_verify_fw4kBfmxdeLF0r3z.txt 内容一致，文件缺失时仍可校验通过
+    _VERIFY_FALLBACK = 'fw4kBfmxdeLF0r3z'
+
+    def GET(self):
+        # 按优先级尝试：项目根(get_root)、web_channel 所在包的上两级目录
+        candidates = [
+            os.path.join(get_root(), self._VERIFY_FILENAME),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', self._VERIFY_FILENAME),
+        ]
+        content = None
+        for path in candidates:
+            path = os.path.normpath(path)
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                break
+            except OSError:
+                continue
+        if content is None:
+            logger.warning(f"[WebChannel] Wechat verify file not found, tried: {candidates}; using fallback")
+            content = self._VERIFY_FALLBACK
+        web.header('Content-Type', 'text/plain; charset=utf-8')
+        return content
+
+
 class MessageHandler:
     def POST(self):
         return WebChannel().post_message()
@@ -387,6 +423,13 @@ class ChatHandler:
     def GET(self):
         # 正常返回聊天页面
         file_path = os.path.join(os.path.dirname(__file__), 'chat.html')
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+
+class DebugHandler:
+    def GET(self):
+        file_path = os.path.join(os.path.dirname(__file__), 'debug.html')
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
 
@@ -1186,6 +1229,19 @@ class RecruitCandidateDetailHandler:
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 
+class RecruitMediaProxyHandler:
+    def GET(self, asset_id):
+        try:
+            resp = RecruitMCPProxy.request('GET', f'/media/{asset_id}', params={"token": os.getenv("MEDIA_TOKEN", "media-secret")}, stream=True)
+            content_type = resp.headers.get('content-type', 'application/octet-stream')
+            web.header('Content-Type', content_type)
+            web.header('Cache-Control', 'public, max-age=86400')
+            return resp.content
+        except Exception as e:
+            logger.error(f"[WebChannel] Media proxy error: {e}")
+            raise web.notfound()
+
+
 class RecruitPromptsHandler:
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
@@ -1226,6 +1282,72 @@ class RecruitPromptRollbackHandler:
             return json.dumps({"status": "success", **data}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Recruit prompt rollback error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitPromptExamplesHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            data = RecruitMCPProxy.request('GET', '/prompt-examples').json()
+            return json.dumps({"status": "success", "items": data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt-examples list error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or '{}')
+            data = RecruitMCPProxy.request('POST', '/prompt-examples', json=body).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt-examples create error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitPromptExampleDetailHandler:
+    def PUT(self, example_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or '{}')
+            data = RecruitMCPProxy.request('PUT', f'/prompt-examples/{example_id}', json=body).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt-example update error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    def DELETE(self, example_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            data = RecruitMCPProxy.request('DELETE', f'/prompt-examples/{example_id}').json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt-example delete error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitPromptExampleReviewHandler:
+    def PATCH(self, example_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or '{}')
+            data = RecruitMCPProxy.request('PATCH', f'/prompt-examples/{example_id}/review', json=body).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt-example review error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class RecruitPromptExamplesReviewAllHandler:
+    def PATCH(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or '{}')
+            data = RecruitMCPProxy.request('PATCH', '/prompt-examples/review-all', json=body).json()
+            return json.dumps({"status": "success", **data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Recruit prompt-examples review-all error: {e}")
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 

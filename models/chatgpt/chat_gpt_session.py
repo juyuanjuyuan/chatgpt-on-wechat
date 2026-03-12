@@ -60,6 +60,9 @@ def num_tokens_from_messages(messages, model):
     if model in ["wenxin", "xunfei"] or model.startswith(const.GEMINI):
         return num_tokens_by_character(messages)
 
+    if model.startswith("deepseek") or model.startswith("qwen"):
+        return num_tokens_by_character(messages)
+
     import tiktoken
 
     if model in ["gpt-3.5-turbo-0301", "gpt-35-turbo", "gpt-3.5-turbo-1106", "moonshot", const.LINKAI_35]:

@@ -17,8 +17,6 @@ depends_on = None
 def upgrade() -> None:
     candidate_status = sa.Enum('pending_photo','pending_review','reviewing','passed','rejected','blacklisted','underage_terminated','need_more_photo', name='candidatestatus')
     user_role = sa.Enum('admin','readonly', name='userrole')
-    candidate_status.create(op.get_bind(), checkfirst=True)
-    user_role.create(op.get_bind(), checkfirst=True)
 
     op.create_table('candidates',
         sa.Column('id', sa.Integer(), primary_key=True),

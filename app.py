@@ -232,6 +232,13 @@ def sigterm_handler_wrap(_signo):
 def run():
     global _channel_mgr
     try:
+        # Load .env from project root so FOLLOWUP_* / PROFILE_EXTRACTION_* etc. take effect
+        try:
+            from dotenv import load_dotenv
+            root = os.path.dirname(os.path.abspath(__file__))
+            load_dotenv(os.path.join(root, ".env"))
+        except Exception:
+            pass
         # load config
         load_config()
         # ctrl + c
@@ -261,6 +268,18 @@ def run():
 
         _channel_mgr = ChannelManager()
         _channel_mgr.start(channel_names, first_start=True)
+
+        _followup_enabled = os.getenv("FOLLOWUP_ENABLED", "false").lower().strip() in ("1", "true", "yes")
+        _profile_enabled = os.getenv("PROFILE_EXTRACTION_ENABLED", "true").lower().strip() in ("1", "true", "yes")
+        if _followup_enabled or _profile_enabled:
+            from common.followup_scheduler import FollowupScheduler
+            _followup = FollowupScheduler()
+            _followup.start()
+        else:
+            logger.info(
+                "[App] Scheduler not started: set FOLLOWUP_ENABLED or PROFILE_EXTRACTION_ENABLED to true/1/yes to enable "
+                "hourly followup and/or profile extraction (every 5 min scan, 20 min idle)."
+            )
 
         while True:
             time.sleep(1)

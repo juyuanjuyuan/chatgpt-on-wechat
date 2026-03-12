@@ -1,5 +1,6 @@
 # encoding:utf-8
 
+import os
 import time
 import json
 
@@ -16,7 +17,7 @@ from bridge.context import ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
 from common.token_bucket import TokenBucket
-from config import conf, load_config
+from config import conf, load_config, get_root
 from models.baidu.baidu_wenxin_session import BaiduWenxinSession
 from common.cowagent_runtime import MCPRuntimeClient
 
@@ -67,7 +68,36 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
             'default_frequency_penalty': conf().get("frequency_penalty", 0.0),
             'default_presence_penalty': conf().get("presence_penalty", 0.0),
         }
-    
+
+    def _load_fallback_recruiter_prompt(self):
+        """When MCP is unreachable, load recruiter prompt from local file."""
+        fallback_path = conf().get("recruiter_prompt_fallback", "prompts/recruiter_v1.md")
+        path = os.path.join(get_root(), fallback_path)
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content:
+                    logger.info("[CHATGPT] Using fallback recruiter prompt from {}".format(path))
+                    return content
+        except Exception as e:
+            logger.warning("[CHATGPT] Failed to load fallback recruiter prompt: {}".format(e))
+        return ""
+
+    def _restore_history(self, session, session_id):
+        """Reload conversation history from MCP when an in-memory session has
+        expired and been recreated, so the LLM retains context across gaps."""
+        try:
+            history = self.runtime_client.get_conversation_history(session_id)
+            if history:
+                for msg in history:
+                    role = "assistant" if msg.get("sender") == "assistant" else "user"
+                    session.messages.append({"role": role, "content": msg["content"]})
+                logger.info("[CHATGPT] Restored {} messages from MCP for session {}".format(
+                    len(history), session_id))
+        except Exception as e:
+            logger.warning("[CHATGPT] Failed to restore history: {}".format(e))
+
     def reply(self, query, context=None):
         # acquire reply content
         if context.type == ContextType.TEXT:
@@ -88,8 +118,12 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
             if reply:
                 return reply
             runtime_prompt = self.runtime_client.get_active_prompt()
+            if not runtime_prompt:
+                runtime_prompt = self._load_fallback_recruiter_prompt()
             if runtime_prompt:
                 session = self.sessions.build_session(session_id, runtime_prompt)
+                if len(session.messages) <= 1:
+                    self._restore_history(session, session_id)
                 session.add_query(query)
                 try:
                     max_tokens = conf().get("conversation_max_tokens", 1000)
