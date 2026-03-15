@@ -249,6 +249,9 @@ class FollowupScheduler:
         context["receiver"] = receiver
         context["session_id"] = session_key
         context["isgroup"] = False
+        # Needed so WechatComAppChannel.send() routes through kf/send_msg
+        # (external WeChat users) instead of the internal member message API.
+        context["external_userid"] = receiver
         reply = Reply(ReplyType.TEXT, text)
         ch.send(reply, context)
 

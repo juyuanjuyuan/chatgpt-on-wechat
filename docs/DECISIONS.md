@@ -79,6 +79,37 @@
    - 现象：跟进（每小时）与资料抽取（每 5 分钟扫描、静默 20 分钟后抽取）有时不触发，或配置了 PROFILE_EXTRACTION_ENABLED=1/yes 仍不生效。
    - 原因：`FollowupScheduler` 内 `_profile_enabled` 仅接受字面量 `"true"`，与 app 启动条件（接受 1/true/yes）不一致；未根据 `FOLLOWUP_ENABLED` 门控跟进任务；本地运行未加载项目根目录 `.env`；Docker 未传入调度相关环境变量。
 
+18. **修复微信客服历史消息重放导致消息风暴（95001 + AI 批量调用）**
+   - 现象：每次服务重启后，后端对同一用户连续调用 40 次 AI 并尝试批量发送，导致 95001（send msg count limit）错误，用户收到大量重复回复。
+   - 根本原因：
+     1. `kf_sync_cursor.json` 存在但 `open_kfid` 对应的 cursor 为空（初次或文件被清空），导致 `sync_msg` 不带 cursor 调用时 WeChat 返回从历史开头到当前的全量消息（本次为 40 条）。
+     2. `_startup_time` 字段虽然存在但从未被实际用于过滤消息。
+     3. 并发 webhook 事件被直接丢弃（`blocking=False`），导致新消息可能错过。
+     4. `_send_kf_text` 遇到 95001 直接失败不重试，回复彻底丢失。
+   - 修复：
+     1. `_startup_time` 改为基于 `open_kfid` 是否存在有效 cursor 来决定是否启用：若无 cursor，记录启动时间；在 `_kf_sync_msg_inner` 内对 `send_time < _startup_time` 的历史消息直接跳过并标记 dedup。
+     2. 并发事件改为设置 `_kf_sync_pending` 标志位，当前 sync 完成后立即触发一次补充 sync，不丢新消息。
+     3. `_send_kf_text` 遇到 95001 时指数退避重试最多 3 次（2s / 4s / 6s）。
+
+19. **消息聚合窗口（拟人化批量发送）**
+   - 背景：用户在短时间内连续发多条消息时，AI 可能仅回复最后一条而漏掉中间条；同时 AI 回复速度远超人类打字速度，会让用户察觉并降低发照意愿。
+   - 方案：在 `ChatChannel.produce()` 中，TEXT 类型消息（管理命令 `#` 除外）不立即入队，而是在内存中按 `session_id` 聚合，等待 `msg_batch_window_seconds`（默认 30 秒）后一次性将本窗口内所有文本消息合并（用换行符拼接）作为单条 context 送入处理队列，再走原有的 AI 生成流程。非文本消息（图片、语音等）仍立即入队，不受聚合影响。
+   - 配置项：`msg_batch_window_seconds`（整数，默认 30；设为 0 可完全禁用聚合）。
+   - 影响：
+     1. 同一批次多条消息只触发一次 AI 调用，AI 可看到完整上下文，不再漏消息。
+     2. AI 回复的最短等待时间增加至 30 秒（窗口结束后才处理），更接近人类回复节奏。
+     3. MCP 的 `log_message` 记录的是合并后的内容，而非每条子消息，日志会显示换行拼接的文本。
+     4. `cancel_session` / `cancel_all_session` 同步取消尚未触发的聚合 Timer，不产生孤儿线程。
+
+17. **防止多实例并发导致重复发消息**
+   - 现象：用户在微信端收到 AI 的同一条回复被重复发送 10 次以上。
+   - 根本原因：运维人员连续执行两次 `python3 app.py >> run.log 2>&1 &`，导致两个进程同时运行。两个进程的 `_processed_msgids` 去重字典各自独立（内存级，不跨进程共享），且共享同一个 cursor 文件，故两进程同时拉取到相同的微信客服消息，各自独立触发 AI 并发送回复。
+   - 修复：
+     1. `app.py` 启动时写入 `app.pid` 锁文件；若检测到已有进程持有锁则打印提示并退出，彻底防止多实例。
+     2. `_kf_sync_msg` 内加 `threading.Lock(non-blocking acquire)` 防止同一进程内微信重试 webhook 导致并发进入同步循环。
+     3. `common/log.py` 增加 `/proc` 检测：若 stdout 已被重定向至 `run.log`，则跳过额外的 `FileHandler`，避免每行日志在文件中重复出现两次。
+   - 影响：不影响任何业务逻辑，仅改进稳定性与日志可读性。
+
 16. **招募看板发照转化率改为历史口径**
    - 原因：以“今日新增”为分母的转化率在冷启动或低流量时波动大，运营更关注整体转化表现。
    - 方案：`GET /metrics/overview` 新增 `photo_conversion_rate`，计算方式为（历史上曾发照的候选人数 / 历史进入流程的候选人数）× 100；保留 `today_photo_conversion_rate` 与今日相关字段供其他场景使用。Web Console 招募看板展示 `photo_conversion_rate`，文案改为“历史进入流程的候选人中已发照的比例”。

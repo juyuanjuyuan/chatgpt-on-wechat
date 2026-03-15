@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import time
+import atexit
 
 from channel import channel_factory
 from common import const
@@ -11,6 +12,46 @@ from common.log import logger
 from config import load_config, conf
 from plugins import *
 import threading
+
+_PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.pid")
+
+
+def _acquire_pid_lock():
+    """Check for and write a PID file so only one instance runs at a time."""
+    if os.path.exists(_PID_FILE):
+        try:
+            with open(_PID_FILE, "r") as f:
+                old_pid = int(f.read().strip())
+            # Check if that process is still alive
+            os.kill(old_pid, 0)
+            # If we get here, the process is running
+            print(
+                f"[ERROR] Another instance of app.py is already running (PID {old_pid}).\n"
+                f"        Run: kill {old_pid}   then restart.\n"
+                f"        Or remove the lock file manually: rm {_PID_FILE}"
+            )
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            # Stale PID file — previous process died without cleanup
+            pass
+        except PermissionError:
+            # Process exists but we can't send signals to it (different user?)
+            print(
+                f"[ERROR] PID file {_PID_FILE} exists and process {old_pid} may still be running.\n"
+                f"        If you are sure it is not running, remove: rm {_PID_FILE}"
+            )
+            sys.exit(1)
+
+    with open(_PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    def _cleanup_pid():
+        try:
+            os.remove(_PID_FILE)
+        except OSError:
+            pass
+
+    atexit.register(_cleanup_pid)
 
 
 _channel_mgr = None
@@ -231,6 +272,7 @@ def sigterm_handler_wrap(_signo):
 
 def run():
     global _channel_mgr
+    _acquire_pid_lock()
     try:
         # Load .env from project root so FOLLOWUP_* / PROFILE_EXTRACTION_* etc. take effect
         try:

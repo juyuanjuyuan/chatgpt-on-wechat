@@ -36,6 +36,10 @@ class ChatChannel(Channel):
         self.futures = {}
         self.sessions = {}
         self.lock = threading.Lock()
+        # Message batching buffer: accumulates TEXT messages per session for
+        # msg_batch_window_seconds before forwarding the merged message to the AI.
+        self._msg_buffer = {}   # session_id -> {"contexts": [...], "timer": Timer}
+        self._buffer_lock = threading.Lock()
         _thread = threading.Thread(target=self.consume)
         _thread.setDaemon(True)
         _thread.start()
@@ -220,6 +224,16 @@ class ChatChannel(Channel):
 
         # reply的包装步骤
         if reply and reply.content:
+            # 检测 AI 发出的对话结束信号，直接丢弃，不发送给用户
+            # 用 splitlines 兼容模型在 /end_conversation 前后带少量多余文本的情况
+            _reply_lines = [l.strip() for l in str(reply.content).splitlines() if l.strip()]
+            if _reply_lines == ["/end_conversation"]:
+                logger.info("[chat_channel] AI signaled end_conversation, suppressing reply to channel")
+                if external_id:
+                    # 记录为事件而非消息，避免被 _restore_history 当作普通 assistant 消息还原进上下文
+                    runtime_client.add_event(external_id, session_key, "end_conversation")
+                return
+
             reply = self._decorate_reply(context, reply)
 
             # reply的发送步骤
@@ -338,21 +352,44 @@ class ChatChannel(Channel):
             reply = e_context["reply"]
             if not e_context.is_pass() and reply and reply.type:
                 logger.debug("[chat_channel] sending reply: {}, context: {}".format(reply, context))
-                
-                # 如果是文本回复，尝试提取并发送图片
+
+                # 文本回复：按空行分段，模拟人类一段一段发送；每段之间等待 5 秒。
                 if reply.type == ReplyType.TEXT:
-                    self._extract_and_send_images(reply, context)
-                # 如果是图片回复但带有文本内容，先发文本再发图片
-                elif reply.type == ReplyType.IMAGE_URL and hasattr(reply, 'text_content') and reply.text_content:
-                    # 先发送文本
+                    self._send_text_segments(reply, context)
+                # 如果是图片回复但带有文本内容，先发一段文本再发图片
+                elif reply.type == ReplyType.IMAGE_URL and hasattr(reply, "text_content") and reply.text_content:
                     text_reply = Reply(ReplyType.TEXT, reply.text_content)
-                    self._send(text_reply, context)
-                    # 短暂延迟后发送图片
+                    self._send_text_segments(text_reply, context)
                     time.sleep(0.3)
                     self._send(reply, context)
                 else:
                     self._send(reply, context)
-    
+
+    def _send_text_segments(self, reply: Reply, context: Context, gap_seconds: int = 5):
+        """
+        将一条长文本按“空行”拆成多段，模拟人类一段一段发送。
+        规则：
+        - 连续出现的空行视为一处分段点
+        - 每段非空文本通过 _extract_and_send_images 发送（保持图片提取逻辑）
+        - 段与段之间 sleep gap_seconds 秒
+        """
+        content = str(reply.content or "")
+        # 使用空行作为分隔符：任意包含非空白字符之间的空行都视作分段
+        raw_parts = re.split(r"\n\s*\n+", content)
+        parts = [p.strip() for p in raw_parts if p and p.strip()]
+
+        if not parts:
+            # 没有有效内容时，退化为原始发送逻辑
+            self._extract_and_send_images(reply, context)
+            return
+
+        for idx, part in enumerate(parts):
+            seg_reply = Reply(ReplyType.TEXT, part)
+            self._extract_and_send_images(seg_reply, context)
+            # 段与段之间等待 gap_seconds 秒（最后一段之后不再等待）
+            if idx != len(parts) - 1:
+                time.sleep(gap_seconds)
+
     def _extract_and_send_images(self, reply: Reply, context: Context):
         """
         从文本回复中提取图片/视频URL并单独发送
@@ -470,6 +507,45 @@ class ChatChannel(Channel):
 
     def produce(self, context: Context):
         session_id = context["session_id"]
+
+        # Buffer TEXT messages (except admin commands) for humanized batching.
+        # All messages arriving within msg_batch_window_seconds of the first one
+        # are merged into a single context before being forwarded to the AI.
+        if context.type == ContextType.TEXT and not context.content.startswith("#"):
+            batch_window = conf().get("msg_batch_window_seconds", 30)
+            if batch_window > 0:
+                with self._buffer_lock:
+                    if session_id in self._msg_buffer:
+                        # Timer already running; just append to the existing batch.
+                        self._msg_buffer[session_id]["contexts"].append(context)
+                        logger.debug(
+                            "[chat_channel] buffered text msg for session %s (total: %d)",
+                            session_id, len(self._msg_buffer[session_id]["contexts"]),
+                        )
+                    else:
+                        # First message in this batch: start the countdown timer.
+                        timer = threading.Timer(
+                            batch_window, self._flush_buffer, args=[session_id]
+                        )
+                        timer.daemon = True
+                        self._msg_buffer[session_id] = {
+                            "contexts": [context],
+                            "timer": timer,
+                        }
+                        timer.start()
+                        logger.debug(
+                            "[chat_channel] started %ds batch window for session %s",
+                            batch_window, session_id,
+                        )
+                return  # Wait for the timer to flush; do not enqueue yet.
+
+        # Non-TEXT messages (images, voice, etc.) and admin "#" commands bypass
+        # the buffer and go straight into the processing queue.
+        self._enqueue_context(context)
+
+    def _enqueue_context(self, context: Context):
+        """Put a context directly onto the per-session processing queue."""
+        session_id = context["session_id"]
         with self.lock:
             if session_id not in self.sessions:
                 self.sessions[session_id] = [
@@ -480,6 +556,37 @@ class ChatChannel(Channel):
                 self.sessions[session_id][0].putleft(context)  # 优先处理管理命令
             else:
                 self.sessions[session_id][0].put(context)
+
+    def _flush_buffer(self, session_id: str):
+        """Timer callback: merge all buffered TEXT messages and enqueue them."""
+        with self._buffer_lock:
+            if session_id not in self._msg_buffer:
+                return
+            entry = self._msg_buffer.pop(session_id)
+
+        contexts = entry["contexts"]
+        if not contexts:
+            return
+
+        if len(contexts) == 1:
+            merged_context = contexts[0]
+            logger.debug(
+                "[chat_channel] flushing 1 buffered message for session %s", session_id
+            )
+        else:
+            # Combine the text of all messages with newline separators, then
+            # carry the first message's metadata (receiver, msg, session_id, …)
+            # so the rest of the pipeline works unchanged.
+            combined_content = "\n".join(c.content for c in contexts)
+            merged_context = contexts[0]
+            merged_context.content = combined_content
+            logger.info(
+                "[chat_channel] flushing %d buffered messages for session %s "
+                "(merged len=%d chars)",
+                len(contexts), session_id, len(combined_content),
+            )
+
+        self._enqueue_context(merged_context)
 
     # 消费者函数，单独线程，用于从消息队列中取出消息并处理
     def consume(self):
@@ -510,6 +617,11 @@ class ChatChannel(Channel):
 
     # 取消session_id对应的所有任务，只能取消排队的消息和已提交线程池但未执行的任务
     def cancel_session(self, session_id):
+        # Cancel any pending batch-buffer timer for this session first.
+        with self._buffer_lock:
+            if session_id in self._msg_buffer:
+                self._msg_buffer[session_id]["timer"].cancel()
+                del self._msg_buffer[session_id]
         with self.lock:
             if session_id in self.sessions:
                 for future in self.futures[session_id]:
@@ -520,6 +632,11 @@ class ChatChannel(Channel):
                 self.sessions[session_id][0] = Dequeue()
 
     def cancel_all_session(self):
+        # Cancel all pending batch-buffer timers first.
+        with self._buffer_lock:
+            for entry in self._msg_buffer.values():
+                entry["timer"].cancel()
+            self._msg_buffer.clear()
         with self.lock:
             for session_id in self.sessions:
                 for future in self.futures[session_id]:

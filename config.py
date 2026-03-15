@@ -52,6 +52,7 @@ available_setting = {
     "image_proxy": True,  # 是否需要图片代理，国内访问LinkAI时需要
     "image_create_prefix": ["画", "看", "找"],  # 开启图片回复的前缀
     "concurrency_in_session": 1,  # 同一会话最多有多少条消息在处理中，大于1可能乱序
+    "msg_batch_window_seconds": 30,  # 消息聚合窗口（秒）：用户第一条消息到达后，等待该时长收集后续消息再一起发给 AI；0 表示禁用聚合
     "image_create_size": "256x256",  # 图片大小,可选有 256x256, 512x512, 1024x1024 (dall-e-3默认为1024x1024)
     "group_chat_exit_group": False,
     # chatgpt会话参数
@@ -140,12 +141,15 @@ available_setting = {
     "wechatmp_aes_key": "",  # 微信公众平台的EncodingAESKey，加密模式需要
     # wechatcom的通用配置
     "wechatcom_corp_id": "",  # 企业微信公司的corpID
-    # wechatcomapp的配置
+    # wechatcomapp的配置（自建应用 + 微信客服）
     "wechatcomapp_token": "",  # 企业微信app的token
     "wechatcomapp_port": 9898,  # 企业微信app的服务端口,不需要端口转发
-    "wechatcomapp_secret": "",  # 企业微信app的secret
+    "wechatcomapp_secret": "",  # 企业微信app的secret（自建应用）
     "wechatcomapp_agent_id": "",  # 企业微信app的agent_id
     "wechatcomapp_aes_key": "",  # 企业微信app的aes_key
+    # 微信客服相关配置（可选）。如配置，则优先通过 kf/send_msg 给外部联系人回复。
+    "wechatcom_kf_secret": "",  # 企业微信「微信客服」的secret，用于获取access_token
+    "wechatcom_kf_open_kfid": "",  # 企微「微信客服帐号」的 open_kfid
     # 飞书配置
     "feishu_port": 80,  # 飞书bot监听端口
     "feishu_app_id": "",  # 飞书机器人应用APP Id

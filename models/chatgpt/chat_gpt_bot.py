@@ -84,17 +84,44 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
             logger.warning("[CHATGPT] Failed to load fallback recruiter prompt: {}".format(e))
         return ""
 
+    # 触发 /end_conversation 的短确认词
+    _END_ACK_SET = {
+        "好", "好的", "好吧", "好了", "好哒", "嗯", "嗯嗯", "哦", "哦哦",
+        "ok", "OK", "Ok", "okay", "收到", "知道了", "知道", "明白", "行",
+        "好的呢", "好嘞", "好哦","嗯嗯好的","嗯嗯好的","哦哦好","哦哦好的"
+    }
+    # 上一条 AI 消息含这些词时，认为对话已自然结束
+    _END_COMPLETION_SIGNALS = [
+        "1-3天", "1–3 天", "1~3天", "审核", "出结果", "通知你",
+        "随时在", "随时找我", "先不打扰", "不催了", "尊重你",
+    ]
+
+    def _is_conversation_end_ack(self, query: str, session) -> bool:
+        """输入侧判断：用户发了简单确认词 + 上一条 AI 回复含结束信号 → 直接返回 /end_conversation"""
+        if query.strip() not in self._END_ACK_SET:
+            return False
+        for msg in reversed(session.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                return any(sig in content for sig in self._END_COMPLETION_SIGNALS)
+        return False
+
     def _restore_history(self, session, session_id):
         """Reload conversation history from MCP when an in-memory session has
         expired and been recreated, so the LLM retains context across gaps."""
         try:
             history = self.runtime_client.get_conversation_history(session_id)
             if history:
+                added = 0
                 for msg in history:
+                    # 过滤内部信号，不还原进 AI 上下文
+                    if msg.get("content", "").strip() == "/end_conversation":
+                        continue
                     role = "assistant" if msg.get("sender") == "assistant" else "user"
                     session.messages.append({"role": role, "content": msg["content"]})
+                    added += 1
                 logger.info("[CHATGPT] Restored {} messages from MCP for session {}".format(
-                    len(history), session_id))
+                    added, session_id))
         except Exception as e:
             logger.warning("[CHATGPT] Failed to restore history: {}".format(e))
 
@@ -124,6 +151,10 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
                 session = self.sessions.build_session(session_id, runtime_prompt)
                 if len(session.messages) <= 1:
                     self._restore_history(session, session_id)
+                # 输入侧拦截：用户只是在确认一个已结束的对话，不必调 API
+                if self._is_conversation_end_ack(query, session):
+                    logger.info("[CHATGPT] conversation-end ACK detected, skipping API call")
+                    return Reply(ReplyType.TEXT, "/end_conversation")
                 session.add_query(query)
                 try:
                     max_tokens = conf().get("conversation_max_tokens", 1000)
@@ -156,8 +187,11 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
             if reply_content["completion_tokens"] == 0 and len(reply_content["content"]) > 0:
                 reply = Reply(ReplyType.ERROR, reply_content["content"])
             elif reply_content["completion_tokens"] > 0:
-                self.sessions.session_reply(reply_content["content"], session_id, reply_content["total_tokens"])
-                reply = Reply(ReplyType.TEXT, reply_content["content"])
+                content = reply_content["content"]
+                # /end_conversation 是内部信号，不写入 session 历史，避免污染上下文
+                if content.strip() != "/end_conversation":
+                    self.sessions.session_reply(content, session_id, reply_content["total_tokens"])
+                reply = Reply(ReplyType.TEXT, content)
             else:
                 reply = Reply(ReplyType.ERROR, reply_content["content"])
                 logger.debug("[CHATGPT] reply {} used 0 tokens.".format(reply_content))

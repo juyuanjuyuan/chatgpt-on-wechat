@@ -34,25 +34,29 @@ Web Console Recruit 视图 / 独立 Dashboard -> MCP API Server
 |---|---|
 | `app.py` | 程序入口，多通道启动管理。 |
 | `channel/` | 各通道实现；`chat_channel.py` 为核心公共消息处理链。 |
-| `channel/web/` | 原生 Web Console（现已集成 Recruit 视图）。 |
+| `channel/web/` | 原生 Web Console（已集成 Recruit、训练语料等视图）。 |
 | `models/` | 模型与 session 管理（如 `chatgpt`）。 |
 | `common/cowagent_runtime.py` | Runtime -> MCP 调用封装与招募策略函数。 |
+| `common/followup_scheduler.py` | 定时跟进与资料抽取调度；需 `FOLLOWUP_ENABLED` 或 `PROFILE_EXTRACTION_ENABLED` 为 true 才启动。 |
 | `mcp_api_server/` | FastAPI MCP 服务，业务 API 与数据访问边界。 |
+| `mcp_api_server/app/profile_extraction.py` | 静默资料抽取流程（历史组装、AI 调用、落库）。 |
+| `mcp_api_server/app/profile_extraction_utils.py` | 状态映射、状态标签、抽取值清洗；单测 `test_candidate_profile_extraction` 依赖此模块。 |
 | `mcp_api_server/alembic/` | Postgres 迁移脚本。 |
-| `dashboard/` | 独立 Next.js 看板（可选入口）。 |
+| `dashboard/` | 独立 Next.js App Router 看板（可选入口）。 |
 | `prompts/recruiter_v1.md` | 默认“北北”Prompt v1 文本。 |
 | `prompts/candidate_profile_extractor.md` | 静默会话资料抽取 Prompt，要求返回 JSON。 |
 | `docs/ARCHITECTURE.md` | 改造架构/数据流说明。 |
 | `docs/DECISIONS.md` | 关键工程决策记录（必须持续追加）。 |
-| `docker-compose.yml` | 本地一键部署编排。 |
+| `docker-compose.yml` | 本地一键部署编排；服务名 `mcp-api-server`、`agent-runtime` 等。 |
 
 ---
 
 ## 3. 修改优先级与设计原则
 
 ### 3.1 稳定性优先
-- 优先保证已有通道不崩溃（wechat/wecom/web）。
+- 优先保证已有通道不崩溃（wechat / wechatcom_app 企微应用 / wework / wechatmp / web 等；文档中「wecom」即企微俗称，代码中通道类型为 `wechatcom_app` 或 `wework`）。
 - 对 `chat_channel.py` 的改动必须“最小侵入”。
+- 已启用**消息聚合窗口**：`ChatChannel.produce()` 会按 `session_id` 将 30 秒内的多条文本消息合并后再调用 AI（窗口大小由 `msg_batch_window_seconds` 控制，默认 30 秒，设为 0 可关闭）。不要在各具体 channel 内重复实现聚合逻辑，统一复用该机制。
 
 ### 3.2 业务边界优先
 - 新增招募后台功能时，优先改 MCP API 与前端，不要直接跨层直连数据库。
@@ -84,14 +88,14 @@ Web Console Recruit 视图 / 独立 Dashboard -> MCP API Server
   2) `console.js` 加 `VIEW_META` 路由与懒加载
   3) 后端 `web_channel.py` 增加 `/api/*` 处理器
 - 避免重复绑定事件（使用 dataset 标记或初始化开关）。
-- 招募看板当前已带自动刷新；若继续调整刷新逻辑，务必在离开 `recruit` 视图时停止 timer，避免后台重复请求。
+- 招募看板当前为**手动刷新**（点击「立即刷新」获取最新数据）；若将来改为自动刷新，离开 `recruit` 视图时须停止 timer，避免后台重复请求。
 - 招募状态展示统一在前端映射为中文业务语义：`pending_photo` => `未发送照片`，`pending_review` => `已发送照片`；不要直接把中文状态值写入数据库。
 
 ### MCP API（FastAPI）
 - 新接口默认考虑鉴权与权限（admin / readonly）。
 - 媒体访问必须受控（token 或签名方式）。
 - 新字段变更必须配套 Alembic migration。
-- 资料抽取属于 MCP 业务边界，统一放在 `mcp_api_server/app/main.py` + `mcp_api_server/app/profile_extraction.py`，不要把“从历史会话提取 nickname/city/status”的逻辑再塞回 channel。
+- 资料抽取属于 MCP 业务边界：流程在 `mcp_api_server/app/profile_extraction.py`，状态映射与清洗在 `profile_extraction_utils.py`，`main.py` 仅调用；不要把“从历史会话提取 nickname/city/status”的逻辑塞回 channel。
 - 候选人资料抽取要求 AI 返回严格 JSON，并在服务端做状态白名单映射与容错；即使模型输出中文状态，也必须先映射回内部 ASCII 枚举再落库。
 
 ---
@@ -116,8 +120,10 @@ Web Console Recruit 视图 / 独立 Dashboard -> MCP API Server
 ```bash
 python -m unittest tests/test_cowagent_runtime.py
 python -m unittest tests/test_candidate_profile_extraction.py
-python -m compileall mcp_api_server/app channel/web/web_channel.py common/cowagent_runtime.py
+python -m compileall mcp_api_server/app channel/web/web_channel.py common/cowagent_runtime.py common/followup_scheduler.py
 ```
+
+（`test_candidate_profile_extraction` 主要测 `profile_extraction_utils` 的状态映射与清洗，无需启动 MCP 服务。）
 
 若改了前端（`channel/web/chat.html` / `console.js` / `dashboard/*`）：
 - 尝试截图验证页面可访问；若环境服务未启动，记录失败原因。
@@ -145,8 +151,8 @@ python -m compileall mcp_api_server/app channel/web/web_channel.py common/cowage
 5. **图片 URL 泄露**：日志中不要打印可直接访问的原图敏感链接。
 6. **MCP_BASE_URL 部署场景**：宿主机直接运行 `python app.py` 时，`MCP_BASE_URL` 默认 `http://127.0.0.1:8001`；Docker 内 `agent-runtime` 使用 `http://mcp-api-server:8001`。宿主机跑 app 时若 MCP 不可达，会出现 `Name or service not known` 的 WARNING。
 7. **招募看板图片显示**：图片消息需经 `upload_photo` 成功入库才有 `media_asset_id`；`log_message` 对 image/voice/video/file 存 `[图片]` 等标签，不存临时路径；Web Console 通过 `/api/recruit/media/{asset_id}` 代理访问 MCP 媒体，`console.js` 对 `message_type===image` 且 `media_asset_id` 存在时渲染 `<img>`。
-8. **资料抽取触发条件**：当前静默资料抽取只针对企微渠道且状态为 `pending_photo` 的候选人；一旦状态进入 `pending_review`（已发送照片）及后续审核态，就不会继续触发。
-9. **抽取逻辑回归风险**：`nickname` / `city` / `status` 的规则测试应优先放在纯工具模块，避免单测因为本地缺少 `fastapi` / `sqlalchemy` 而无法运行。
+8. **资料抽取触发条件**：静默资料抽取仅对**状态为 `pending_photo`** 的候选人触发；进入 `pending_review` 及后续审核态后不再触发。参与抽取的渠道由环境变量 `PROFILE_EXTRACTION_CHANNELS` 控制，默认 `wechatcom_app,wework`（企微类渠道）。
+9. **抽取逻辑回归风险**：`nickname` / `city` / `status` 的规则测试应放在 `mcp_api_server/app/profile_extraction_utils.py` 等纯工具模块，`tests/test_candidate_profile_extraction.py` 仅依赖该模块，不依赖 FastAPI/SQLAlchemy 运行时，便于单测稳定运行。
 
 ---
 
